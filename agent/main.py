@@ -108,6 +108,12 @@ app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=
 # produccion, en vez de adivinar mirando el dashboard o probando por WhatsApp.
 COMMIT = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or "local"
 
+# Solo el motor (sqlite/postgresql), nunca la URL completa -- trae usuario y clave, y
+# este endpoint es publico. Sirve para confirmar que la memoria ya es persistente
+# (postgresql) y no se va a borrar en el proximo redeploy (sqlite).
+_DB_URL_CRUDA = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
+DB_MOTOR = _DB_URL_CRUDA.split("://", 1)[0].split("+", 1)[0] if "://" in _DB_URL_CRUDA else "desconocido"
+
 
 @app.get("/")
 async def health_check():
@@ -128,6 +134,7 @@ async def health_check():
         # al proceso corriendo, sin tener que ir a mirar las Variables de Railway.
         "admin_configurado": bool(ADMIN_WHATSAPP_NUMBER),
         "admin_termina_en": ADMIN_WHATSAPP_NUMBER[-4:] if ADMIN_WHATSAPP_NUMBER else None,
+        "db_motor": DB_MOTOR,
     }
 
 
