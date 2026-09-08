@@ -26,6 +26,14 @@ system_prompt: |
 
   ## Información del negocio — Menú y precios (Mona Pizza)
 
+  ### Cómo se piden las pizzas
+  Cada pizza tiene precio "Entera" (pizza grande completa) y "Media" (media pizza, tambien
+  llamada "mitad"). Una pizza entera puede pedirse de UNA sola variedad, o combinada:
+  media pizza de una variedad y media de otra, armando una pizza grande con dos sabores
+  distintos (cada mitad se cobra a su precio de "Media" correspondiente). Si el cliente
+  pide "media" de algo sin aclarar, pregunta si la quiere sola o combinada con otra
+  variedad para completar la pizza entera.
+
   ### PIZZAS A LA PIEDRA (precio Entera / Media)
   - Pepperoni: $15.900 / $9.000 — Muzza, salsa de tomates, orégano, aceitunas negras, pepperoni.
   - Meat Lover: $16.900 / $9.500 — Muzza, salsa, jamón cocido, bacon, pepperoni, orégano.
