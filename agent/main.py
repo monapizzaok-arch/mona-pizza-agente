@@ -276,19 +276,28 @@ async def procesar_comando_admin(msg: MensajeEntrante):
     elif comando in ("estado", "status"):
         respuesta = "Lisa esta PAUSADA ahora mismo." if await esta_pausado() else "Lisa esta ACTIVA ahora mismo."
     elif comando.startswith("historial"):
-        # Diagnostico: "/historial 5493876403872" muestra lo que Lisa tiene guardado
-        # de ese telefono -- util para confirmar que un mensaje manual quedo bien
-        # guardado, sin tener que mirar la base de datos directamente.
-        partes = texto_comando.split(maxsplit=1)
-        telefono_consulta = partes[1].strip().lstrip("+") if len(partes) > 1 else ""
+        # Diagnostico: "/historial 5493876403872 [cantidad]" muestra lo que Lisa
+        # tiene guardado de ese telefono -- util para confirmar que un mensaje manual
+        # quedo bien guardado, sin tener que mirar la base de datos directamente.
+        # Cantidad opcional (default 10, tope 30) por si el mensaje que buscas ya
+        # quedo tapado por conversacion mas reciente.
+        partes = texto_comando.split()
+        telefono_consulta = partes[1].lstrip("+") if len(partes) > 1 else ""
+        try:
+            cantidad = min(30, max(1, int(partes[2]))) if len(partes) > 2 else 10
+        except ValueError:
+            cantidad = 10
         if not telefono_consulta:
-            respuesta = "Usa: /historial <telefono>, ej. /historial 5493876403872"
+            respuesta = "Usa: /historial <telefono> [cantidad], ej. /historial 5493876403872 20"
         else:
-            historial = await obtener_historial(telefono_consulta, limite=10)
+            historial = await obtener_historial(telefono_consulta, limite=cantidad)
             if not historial:
                 respuesta = f"No hay nada guardado para {telefono_consulta}."
             else:
-                lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:200]}" for h in historial]
+                # Recorte mas chico cuanto mas mensajes se piden, para no pasarse del
+                # limite de WhatsApp (~4096 caracteres).
+                recorte = 300 if cantidad <= 10 else 120
+                lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:recorte]}" for h in historial]
                 respuesta = f"Ultimos {len(historial)} mensajes de {telefono_consulta}:\n\n" + "\n\n".join(lineas)
     else:
         respuesta = "No reconozco ese comando. Escribi /pausar, /reanudar, /estado o /historial <telefono>."
