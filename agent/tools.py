@@ -222,14 +222,19 @@ async def registrar_pedido(
         entrega: "Delivery" o "Retiro en local"
         items: lista de productos, CADA UNO referenciando el catalogo real:
                {
-                 "producto_id": "P1",       # id tal cual aparece en el catalogo en vivo
-                 "variante_index": 1,       # 0 = primera variante de ese producto, 1 = segunda, etc.
+                 "producto_id": "P1",              # id tal cual aparece en el catalogo en vivo
+                 "variante_index": 1,              # 0 = primera variante de ese producto, 1 = segunda, etc.
                  "cantidad": 2,
-                 "producto_id_2": "P11",    # SOLO para pizza mitad y mitad: el id de la otra mitad
+                 "mitad_y_mitad_con": "Muzzarella", # opcional, solo para pizza mitad y mitad
                }
-               Para packs de empanadas (docena/media docena/unidad), cada tamanio va como
-               una linea separada del MISMO producto_id con distinto variante_index — no
-               se inventa un producto "8 empanadas".
+               Cada mitad de una pizza combinada es SU PROPIO producto real (su propio
+               producto_id, variante_index apuntando a "Media"), no una linea combinada
+               inventada tipo "Hawaiana+Muzzarela": van como dos items separados en la
+               lista, cada uno con "mitad_y_mitad_con" apuntando al nombre del otro sabor
+               (asi el ticket de cocina deja claro que las dos mitades son la MISMA pizza).
+               Igual para packs de empanadas (docena/media docena/unidad): cada tamanio va
+               como una linea separada del MISMO producto_id con distinto variante_index —
+               no se inventa un producto "8 empanadas".
         domicilio: direccion de entrega, obligatoria si entrega es "Delivery"
         pago: "Efectivo" o "Transferencia" (por WhatsApp no se ofrece Tarjeta)
         nota: aclaraciones del cliente (sin cebolla, timbre roto, etc.)
@@ -259,7 +264,7 @@ async def registrar_pedido(
             cantidad = max(1, int(item.get("cantidad", 1)))
         except (TypeError, ValueError):
             cantidad = 1
-        pid2 = item.get("producto_id_2")
+        combo_con = (item.get("mitad_y_mitad_con") or "").strip()
 
         prod = catalogo.get(pid)
         if not prod:
@@ -271,26 +276,17 @@ async def registrar_pedido(
             return {"ok": False, "error": f"\"{prod.get('nombre')}\" no tiene esa variante."}
 
         precio_unit = float(precios[vidx])
-        nombre_linea = prod.get("nombre", "")
         etiquetas = prod.get("_etiquetas", [])
         variante_txt = etiquetas[vidx] if vidx < len(etiquetas) else ""
-
-        if pid2:
-            prod2 = catalogo.get(str(pid2))
-            if not prod2:
-                return {"ok": False, "error": f"No encontré el producto \"{pid2}\" en el catálogo actual."}
-            if prod2.get("stock") != "ok":
-                return {"ok": False, "error": f"\"{prod2.get('nombre')}\" no tiene stock en este momento, no lo puedo agregar al pedido."}
-            precios2 = prod2.get("precios", [])
-            if vidx < 0 or vidx >= len(precios2):
-                return {"ok": False, "error": f"\"{prod2.get('nombre')}\" no tiene esa variante."}
-            precio_unit += float(precios2[vidx])
-            nombre_linea = f"{nombre_linea} + {prod2.get('nombre', '')}"
+        # El combo_con es solo texto para el ticket de cocina — la mitad ya es un
+        # producto real e independiente (su propio producto_id), asi que sus estadisticas
+        # de venta y costo se cuentan como corresponde, no pisadas por la otra mitad.
+        detalle = f"{variante_txt} (mitad y mitad con {combo_con})" if combo_con else (variante_txt or None)
 
         lineas.append(
             {
-                "nombre": nombre_linea,
-                "detalle": variante_txt or None,
+                "nombre": prod.get("nombre", ""),
+                "detalle": detalle,
                 "cantidad": cantidad,
                 "precio": round(precio_unit * cantidad, 2),
                 "producto_id": pid,

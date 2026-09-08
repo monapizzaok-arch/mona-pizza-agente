@@ -64,14 +64,16 @@ TOOLS = [
                 "items": {
                     "type": "array",
                     "description": (
-                        "Cada linea referencia un producto del catalogo en vivo por su id "
-                        "real (ej. 'P1', 'e1', 'c3'). Para un pack de empanadas (docena / "
-                        "media docena / unidad), agregá una linea por cada tamaño, todas "
-                        "con el mismo producto_id y el variante_index que corresponda — "
-                        "NUNCA un producto inventado tipo '8 empanadas'. Para una pizza "
-                        "mitad y mitad, una sola linea con producto_id (la primera mitad) "
-                        "+ producto_id_2 (la segunda mitad), variante_index apuntando a "
-                        "'Media' en las dos."
+                        "Cada linea referencia UN producto real del catalogo en vivo por su "
+                        "id (ej. 'P1', 'e1', 'c3') — nunca un producto inventado. Para un "
+                        "pack de empanadas (docena / media docena / unidad), agregá una "
+                        "linea por cada tamaño, todas con el mismo producto_id y el "
+                        "variante_index que corresponda (nunca un producto tipo '8 "
+                        "empanadas'). Para una pizza mitad y mitad, cada mitad es SU PROPIA "
+                        "linea (su propio producto_id, variante_index en 'Media'), NUNCA "
+                        "una linea combinada tipo 'Hawaiana+Muzzarela' — usá "
+                        "mitad_y_mitad_con en cada una de las dos para que quede claro en "
+                        "el ticket que son la misma pizza."
                     ),
                     "items": {
                         "type": "object",
@@ -85,9 +87,9 @@ TOOLS = [
                                 "description": "Indice de la variante elegida dentro de ese producto (0 = primera variante listada, 1 = segunda, etc.)",
                             },
                             "cantidad": {"type": "integer", "description": "Cuantas unidades de ESTA linea (producto+variante)"},
-                            "producto_id_2": {
+                            "mitad_y_mitad_con": {
                                 "type": "string",
-                                "description": "Solo para pizza mitad y mitad: id del producto de la segunda mitad. Omitilo si no es un combo.",
+                                "description": "Solo para pizza mitad y mitad: nombre del OTRO sabor con el que se arma la misma pizza (va como texto en el ticket, no cambia el precio de esta linea). Omitilo si no es un combo.",
                             },
                         },
                         "required": ["producto_id", "variante_index", "cantidad"],
@@ -254,12 +256,24 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
     if menu is not None:
         config = menu.get("config", {})
         alias = config.get("cbu_alias") or config.get("cbu") or config.get("alias") or ""
+        try:
+            tiempo_prep = int(float(config.get("tiempo_preparacion_default_monapizza") or 0))
+        except (TypeError, ValueError):
+            tiempo_prep = 0
+        try:
+            tiempo_envio = int(float(config.get("tiempo_envio_default_monapizza") or 0))
+        except (TypeError, ValueError):
+            tiempo_envio = 0
         system_prompt += (
             "\n\n## Catálogo en vivo (fuente real de precios, stock e ids — el menú de más "
             "arriba en este prompt es solo referencia de ingredientes/sabores y puede tener "
             "precios viejos)\n"
             f"{formatear_catalogo(menu)}\n\n"
             f"Alias/CBU para transferencias: {alias or '(no hay uno cargado — si el cliente pide pagar por transferencia, avisale que le vas a confirmar el dato)'}\n\n"
+            f"Tiempo estimado (según el sistema): preparación ~{tiempo_prep} min. "
+            f"Para retiro en local, el pedido está listo en ~{tiempo_prep} min. "
+            f"Para delivery, sumale el envío (~{tiempo_envio} min): total estimado ~{tiempo_prep + tiempo_envio} min. "
+            "Mencionalo cuando confirmes un pedido, o si el cliente pregunta cuánto tarda.\n\n"
             "Para armar cada item de registrar_pedido usá el id real de acá (producto_id) y "
             "la posición de la variante elegida (variante_index: 0 = la primera de la lista "
             "para ese producto, 1 = la segunda, etc.). Un producto marcado SIN STOCK no se "
