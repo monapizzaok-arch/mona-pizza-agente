@@ -39,6 +39,11 @@ async def main():
     print("   AgentKit — Test Local")
     print("=" * 55)
     print()
+    print("  ADVERTENCIA: si confirmas un pedido completo (productos, entrega,")
+    print("  forma de pago), Lisa lo va a registrar DE VERDAD en el sistema de")
+    print("  Mona Pizza — aparece en cocina y en el TPV como cualquier otro")
+    print("  pedido real. No hay ambiente de pruebas separado.")
+    print()
     print("  Escribe mensajes como si fueras un cliente.")
     print("  Comandos especiales:")
     print("    'limpiar'  — borra el historial")
@@ -70,7 +75,7 @@ async def main():
         historial = await obtener_historial(TELEFONO_TEST)
 
         print("\nAgente: ", end="", flush=True)
-        respuesta, es_respuesta_real = await generar_respuesta(mensaje, historial)
+        respuesta, es_respuesta_real = await generar_respuesta(mensaje, historial, telefono=TELEFONO_TEST)
         print(respuesta)
         print()
 

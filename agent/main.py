@@ -186,7 +186,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)
-            respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
+            respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial, telefono=msg.telefono)
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 

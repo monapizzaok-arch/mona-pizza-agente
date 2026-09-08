@@ -4,24 +4,36 @@
 """
 Herramientas especificas del negocio de Mona Pizza.
 
-OJO: estas funciones NO se ejecutan solas todavia. La informacion del negocio (menu,
-precios, horarios) le llega al agente por el system prompt (config/prompts.yaml), asi
-que para CONTESTAR preguntas no hace falta nada de aca. Este archivo es el lugar para
-las ACCIONES: registrar pedidos. Conectarlas al ciclo de tool use de Claude es un paso
-aparte, todavia no implementado.
+La informacion del negocio (menu, precios, horarios) le llega al agente por el system
+prompt (config/prompts.yaml), asi que para CONTESTAR preguntas no hace falta nada de
+aca. Este archivo es el lugar para las ACCIONES: registrar_pedido(), conectada al ciclo
+de tool use de Claude en brain.py, carga el pedido directo en el sistema de gestion de
+Mona Pizza (LocalDB / api.php) — el mismo que usa la web de pedidos.
 """
 
 import json
 import logging
-from datetime import datetime, timezone
+import os
 from pathlib import Path
 
+import httpx
 import yaml
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger("agentkit")
 
 CARPETA_KNOWLEDGE = Path("knowledge")
-ARCHIVO_PEDIDOS = Path("pedidos.jsonl")
+
+# El backend de Mona Pizza (LocalDB): mismo api.php que usa la web publica de pedidos.
+# guardarPedido es una accion publica, no requiere login ni API key.
+LOCALDB_API_URL = os.getenv("LOCALDB_API_URL") or "https://monapizza.com.ar/api/api.php"
+
+# Costo de envio fijo. Coincide con lo que dice el prompt (config/prompts.yaml) y con
+# el valor que usa la web publica. Si el negocio lo cambia, hay que actualizarlo en los
+# dos lugares — no hay forma de consultarlo en vivo sin loguearse como personal
+# (configCobro exige sesion de staff, y Lisa no tiene una).
+COSTO_ENVIO = 1000.0
 
 
 def cargar_info_negocio() -> dict:
@@ -71,53 +83,106 @@ def buscar_en_knowledge(consulta: str) -> str:
 # Toma de pedidos
 # ════════════════════════════════════════════════════════════
 #
-# Mona Pizza usa el agente para tomar pedidos. Estas funciones registran el pedido
-# en un archivo local (pedidos.jsonl): el negocio revisa y confirma manualmente,
-# el agente NO cobra ni confirma que el pedido ya esta en cocina.
+# registrar_pedido() la llama brain.py cuando el cliente confirma el pedido en firme.
+# Carga el pedido DIRECTO en la base de Mona Pizza a traves de la misma accion
+# (guardarPedido) que usa la web publica: aparece al toque en comandas-cocina.html,
+# se lo imprime el puente, y el TPV lo ve como cualquier otro pedido. No hay paso de
+# revision manual — por eso brain.py solo la llama despues de que el cliente confirmo
+# productos, entrega, direccion (si aplica) y forma de pago.
+#
+# Los items ya vienen con el precio de cada linea CALCULADO por Lisa (ella conoce el
+# menu completo y las reglas de combos/mitad-y-mitad de config/prompts.yaml). Esta
+# funcion no vuelve a mirar precios: solo suma lo que le llega y arma el pedido.
 
 
-def registrar_pedido(telefono: str, resumen: str, total: float | None, tipo_entrega: str) -> dict:
+async def registrar_pedido(
+    telefono: str,
+    nombre: str,
+    entrega: str,
+    items: list[dict],
+    domicilio: str = "",
+    pago: str = "Efectivo",
+    nota: str = "",
+) -> dict:
     """
-    Guarda un pedido nuevo para que el local lo revise.
+    Registra el pedido en el sistema de Mona Pizza (LocalDB).
 
     Args:
-        telefono: numero del cliente que hizo el pedido
-        resumen: descripcion de lo pedido (productos, tamanios, cantidades)
-        total: monto total del pedido en pesos, si se pudo calcular
-        tipo_entrega: "delivery" o "retiro"
+        telefono: numero de WhatsApp del cliente (lo agrega brain.py, no lo inventa Claude)
+        nombre: nombre del cliente
+        entrega: "Delivery" o "Retiro en local"
+        items: lista de {"nombre": str, "detalle": str, "cantidad": int, "precio": float}
+               — "precio" es el precio YA CALCULADO de esa linea completa (cantidad
+               incluida), no el precio unitario.
+        domicilio: direccion de entrega, obligatoria si entrega es "Delivery"
+        pago: "Efectivo" o "Transferencia" (por WhatsApp no se ofrece Tarjeta)
+        nota: aclaraciones del cliente (sin cebolla, timbre roto, etc.)
 
     Returns:
-        El pedido guardado, con su id.
+        {"ok": True, "id": <id del pedido>, "seguimiento": <link>} si se registro bien.
+        {"ok": False, "error": <motivo>} si el sistema lo rechazo (ej. local cerrado).
     """
-    pedido = {
-        "id": f"MP-{int(datetime.now(timezone.utc).timestamp())}",
+    if not items:
+        return {"ok": False, "error": "El pedido no tiene productos."}
+
+    subtotal = round(sum(float(i.get("precio") or 0) for i in items), 2)
+    envio = COSTO_ENVIO if "delivery" in entrega.lower() else 0.0
+    total = subtotal + envio
+
+    payload = {
+        "nombre": nombre,
         "telefono": telefono,
-        "resumen": resumen,
+        "entrega": entrega,
+        "domicilio": domicilio,
+        "pago": pago,
+        "items": [
+            {
+                "nombre": i.get("nombre", ""),
+                "detalle": i.get("detalle") or None,
+                "cantidad": i.get("cantidad", 1),
+                "precio": float(i.get("precio") or 0),
+            }
+            for i in items
+        ],
+        "subtotal": subtotal,
+        "envio": envio,
+        "descuento": 0,
+        "recargo": 0,
+        "cupon": "",
+        "cuponDescuento": 0,
         "total": total,
-        "tipo_entrega": tipo_entrega,
-        "estado": "pendiente_confirmacion",
-        "creado_en": datetime.now(timezone.utc).isoformat(),
+        "nota": nota,
+        "negocio": "monapizza",
+        "origen": "web",
     }
 
-    with open(ARCHIVO_PEDIDOS, "a", encoding="utf-8") as f:
-        f.write(json.dumps(pedido, ensure_ascii=False) + "\n")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as cliente:
+            r = await cliente.get(
+                LOCALDB_API_URL,
+                params={"accion": "guardarPedido", "data": json.dumps(payload, ensure_ascii=False)},
+            )
+    except httpx.HTTPError as e:
+        logger.error(f"Error de red registrando pedido en LocalDB: {e}")
+        return {"ok": False, "error": "No pude conectarme al sistema de pedidos. Probá de nuevo en un minuto."}
 
-    logger.info(f"Pedido registrado: {pedido['id']} — {telefono} — {resumen}")
-    return pedido
+    try:
+        cuerpo = r.json()
+    except ValueError:
+        logger.error(f"LocalDB devolvio una respuesta no-JSON [{r.status_code}]: {r.text[:300]}")
+        return {"ok": False, "error": "El sistema de pedidos no respondio como se esperaba."}
 
+    if not cuerpo.get("ok"):
+        error = cuerpo.get("error", "El sistema de pedidos rechazo el pedido.")
+        logger.warning(f"LocalDB rechazo el pedido de {telefono}: {error}")
+        return {"ok": False, "error": error}
 
-def listar_pedidos_de(telefono: str) -> list[dict]:
-    """Devuelve los pedidos previos de un cliente, para que el agente pueda repetir uno."""
-    if not ARCHIVO_PEDIDOS.exists():
-        return []
-
-    pedidos = []
-    with open(ARCHIVO_PEDIDOS, "r", encoding="utf-8") as f:
-        for linea in f:
-            linea = linea.strip()
-            if not linea:
-                continue
-            pedido = json.loads(linea)
-            if pedido.get("telefono") == telefono:
-                pedidos.append(pedido)
-    return pedidos
+    idPedido = cuerpo["id"]
+    logger.info(f"Pedido #{idPedido} registrado en LocalDB para {telefono} — total ${total}")
+    return {
+        "ok": True,
+        "id": idPedido,
+        "total": total,
+        # Mismo link que arma la web de pedidos (pedir__index.html) al confirmar.
+        "seguimiento": f"https://monapizza.com.ar/seguimiento.html?id={idPedido}",
+    }
