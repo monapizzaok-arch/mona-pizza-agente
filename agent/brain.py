@@ -65,15 +65,15 @@ TOOLS = [
                     "type": "array",
                     "description": (
                         "Cada linea referencia UN producto real del catalogo en vivo por su "
-                        "id (ej. 'P1', 'e1', 'c3') — nunca un producto inventado. Para un "
-                        "pack de empanadas (docena / media docena / unidad), agregá una "
-                        "linea por cada tamaño, todas con el mismo producto_id y el "
+                        "id (ej. 'P1', 'e1', 'c3') — nunca un producto inventado, y sin "
+                        "agregarle texto: se carga igual que lo haria la web. Para un pack "
+                        "de empanadas (docena / media docena / unidad), agregá una linea "
+                        "por cada tamaño, todas con el mismo producto_id y el "
                         "variante_index que corresponda (nunca un producto tipo '8 "
                         "empanadas'). Para una pizza mitad y mitad, cada mitad es SU PROPIA "
-                        "linea (su propio producto_id, variante_index en 'Media'), NUNCA "
-                        "una linea combinada tipo 'Hawaiana+Muzzarela' — usá "
-                        "mitad_y_mitad_con en cada una de las dos para que quede claro en "
-                        "el ticket que son la misma pizza."
+                        "linea (su propio producto_id, variante_index en 'Media') — NUNCA "
+                        "una linea combinada tipo 'Hawaiana+Muzzarela'. Una mitad y mitad "
+                        "no es nada fuera de lo comun, no hace falta aclarar nada."
                     ),
                     "items": {
                         "type": "object",
@@ -87,17 +87,18 @@ TOOLS = [
                                 "description": "Indice de la variante elegida dentro de ese producto (0 = primera variante listada, 1 = segunda, etc.)",
                             },
                             "cantidad": {"type": "integer", "description": "Cuantas unidades de ESTA linea (producto+variante)"},
-                            "mitad_y_mitad_con": {
-                                "type": "string",
-                                "description": "Solo para pizza mitad y mitad: nombre del OTRO sabor con el que se arma la misma pizza (va como texto en el ticket, no cambia el precio de esta linea). Omitilo si no es un combo.",
-                            },
                         },
                         "required": ["producto_id", "variante_index", "cantidad"],
                     },
                 },
                 "nota": {
                     "type": "string",
-                    "description": "Aclaraciones del cliente (sin cebolla, timbre roto, etc.), opcional",
+                    "description": (
+                        "SOLO para algo realmente fuera de lo comun (sin cebolla, timbre "
+                        "roto, etc.). No la uses para describir combos normales como mitad "
+                        "y mitad o los packs de empanadas — esos ya quedan claros con los "
+                        "items en si, sin aclaracion."
+                    ),
                 },
             },
             "required": ["nombre", "entrega", "pago", "items"],
@@ -180,8 +181,6 @@ async def _ejecutar_tool(nombre: str, argumentos: dict, telefono: str) -> dict:
     tenga que adivinar o pueda inventar mal.
     """
     if nombre == "registrar_pedido":
-        # producto_id_2 no viaja como kwarg propio: cada item de la lista ya lo trae
-        # (o no) tal cual lo mando Claude, y registrar_pedido lo lee de ahi adentro.
         return await registrar_pedido(
             telefono=telefono,
             nombre=argumentos.get("nombre", ""),

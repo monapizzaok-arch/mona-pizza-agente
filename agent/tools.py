@@ -14,6 +14,7 @@ Mona Pizza (LocalDB / api.php) — el mismo que usa la web de pedidos.
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -24,6 +25,15 @@ load_dotenv()
 logger = logging.getLogger("agentkit")
 
 CARPETA_KNOWLEDGE = Path("knowledge")
+
+# Deduplicacion de registrar_pedido: si Claude la llama dos veces seguidas para el mismo
+# telefono con el MISMO pedido (mismos items, entrega y pago), la segunda vez no vuelve a
+# insertar nada en LocalDB -- devuelve el resultado que ya se guardo. Pasa cuando el
+# cliente confirma en un mensaje y "reconfirma" en el siguiente: sin esto, el pedido
+# quedaba cargado dos veces de verdad, con dos tickets impresos. En memoria del proceso;
+# alcanza porque solo hace falta cubrir una ventana corta.
+_ULTIMOS_PEDIDOS: dict[str, dict] = {}
+DEDUP_VENTANA_SEGUNDOS = 300
 
 # El backend de Mona Pizza (LocalDB): mismo api.php que usa la web publica de pedidos.
 # guardarPedido, estadoApertura y menu son acciones publicas, no requieren login ni API key.
@@ -220,24 +230,27 @@ async def registrar_pedido(
         telefono: numero de WhatsApp del cliente (lo agrega brain.py, no lo inventa Claude)
         nombre: nombre del cliente
         entrega: "Delivery" o "Retiro en local"
-        items: lista de productos, CADA UNO referenciando el catalogo real:
+        items: lista de productos, CADA UNO referenciando el catalogo real, cargado
+               exactamente como lo cargaria la web (sin texto agregado):
                {
-                 "producto_id": "P1",              # id tal cual aparece en el catalogo en vivo
-                 "variante_index": 1,              # 0 = primera variante de ese producto, 1 = segunda, etc.
+                 "producto_id": "P1",  # id tal cual aparece en el catalogo en vivo
+                 "variante_index": 1,  # 0 = primera variante de ese producto, 1 = segunda, etc.
                  "cantidad": 2,
-                 "mitad_y_mitad_con": "Muzzarella", # opcional, solo para pizza mitad y mitad
                }
                Cada mitad de una pizza combinada es SU PROPIO producto real (su propio
-               producto_id, variante_index apuntando a "Media"), no una linea combinada
-               inventada tipo "Hawaiana+Muzzarela": van como dos items separados en la
-               lista, cada uno con "mitad_y_mitad_con" apuntando al nombre del otro sabor
-               (asi el ticket de cocina deja claro que las dos mitades son la MISMA pizza).
-               Igual para packs de empanadas (docena/media docena/unidad): cada tamanio va
-               como una linea separada del MISMO producto_id con distinto variante_index —
-               no se inventa un producto "8 empanadas".
+               producto_id, variante_index apuntando a "Media") como dos items separados
+               en la lista — no una linea combinada inventada tipo "Hawaiana+Muzzarela".
+               Una mitad y mitad no es nada fuera de lo comun: se carga igual que
+               cualquier otro producto, sin aclaraciones. Igual para packs de empanadas
+               (docena/media docena/unidad): cada tamanio va como una linea separada del
+               MISMO producto_id con distinto variante_index — no se inventa un producto
+               "8 empanadas".
         domicilio: direccion de entrega, obligatoria si entrega es "Delivery"
         pago: "Efectivo" o "Transferencia" (por WhatsApp no se ofrece Tarjeta)
-        nota: aclaraciones del cliente (sin cebolla, timbre roto, etc.)
+        nota: aclaracion SOLO si el pedido tiene algo realmente fuera de lo comun (sin
+              cebolla, timbre roto, etc.) — no se usa para describir combos normales
+              como mitad y mitad o los packs de empanadas, que ya quedan claros por los
+              items en si.
 
     Returns:
         {"ok": True, "id": <id del pedido>, "seguimiento": <link>} si se registro bien.
@@ -246,6 +259,12 @@ async def registrar_pedido(
     """
     if not items:
         return {"ok": False, "error": "El pedido no tiene productos."}
+
+    firma = json.dumps({"entrega": entrega, "pago": pago, "items": items}, sort_keys=True, ensure_ascii=False)
+    anterior = _ULTIMOS_PEDIDOS.get(telefono)
+    if anterior and anterior["firma"] == firma and (time.time() - anterior["ts"]) < DEDUP_VENTANA_SEGUNDOS:
+        logger.info(f"registrar_pedido repetido para {telefono} (mismo pedido, pedido #{anterior['resultado'].get('id')}): no se vuelve a insertar")
+        return anterior["resultado"]
 
     menu = await obtener_menu("monapizza")
     if menu is None:
@@ -264,7 +283,6 @@ async def registrar_pedido(
             cantidad = max(1, int(item.get("cantidad", 1)))
         except (TypeError, ValueError):
             cantidad = 1
-        combo_con = (item.get("mitad_y_mitad_con") or "").strip()
 
         prod = catalogo.get(pid)
         if not prod:
@@ -278,10 +296,11 @@ async def registrar_pedido(
         precio_unit = float(precios[vidx])
         etiquetas = prod.get("_etiquetas", [])
         variante_txt = etiquetas[vidx] if vidx < len(etiquetas) else ""
-        # El combo_con es solo texto para el ticket de cocina — la mitad ya es un
-        # producto real e independiente (su propio producto_id), asi que sus estadisticas
-        # de venta y costo se cuentan como corresponde, no pisadas por la otra mitad.
-        detalle = f"{variante_txt} (mitad y mitad con {combo_con})" if combo_con else (variante_txt or None)
+        # Detalle = SOLO la variante, tal cual la cargaria la web (ej. "Media"). Nada de
+        # texto agregado por Lisa: una mitad y mitad no es nada fuera de lo comun, cada
+        # mitad se carga como cualquier otro producto. Si el cliente pide algo realmente
+        # inusual, esa aclaracion va aparte, en el campo "nota" del pedido completo.
+        detalle = variante_txt or None
 
         lineas.append(
             {
@@ -345,10 +364,12 @@ async def registrar_pedido(
 
     idPedido = cuerpo["id"]
     logger.info(f"Pedido #{idPedido} registrado en LocalDB para {telefono} — total ${total}")
-    return {
+    resultado = {
         "ok": True,
         "id": idPedido,
         "total": total,
         # Mismo link que arma la web de pedidos (pedir__index.html) al confirmar.
         "seguimiento": f"https://monapizza.com.ar/seguimiento.html?id={idPedido}",
     }
+    _ULTIMOS_PEDIDOS[telefono] = {"firma": firma, "ts": time.time(), "resultado": resultado}
+    return resultado
