@@ -224,12 +224,15 @@ async def guardar_mensaje_humano(msg: MensajeEntrante):
     el inbox (no via la API). No genera ninguna respuesta -- ya se mando. Sin esto, la
     proxima vez que Lisa le conteste a ese cliente no tendria ni idea de que el local ya
     le dijo algo, y podria contradecirlo.
+
+    El proveedor ya resuelve el telefono del cliente (Zernio lo trae en
+    conversation.participantId); la tabla de conversaciones queda como respaldo por si
+    algun proveedor no lo pudiera resolver directo.
     """
-    conversation_id = msg.contexto.get("conversation_id", "")
-    telefono = await obtener_telefono_de_conversacion(conversation_id)
+    telefono = msg.telefono or await obtener_telefono_de_conversacion(msg.contexto.get("conversation_id", ""))
     if not telefono:
         logger.warning(
-            f"Mensaje manual del local sin telefono resuelto (conversation_id={conversation_id}): "
+            f"Mensaje manual del local sin telefono resuelto (conversation_id={msg.contexto.get('conversation_id')}): "
             "no se pudo guardar en la memoria de ningun cliente"
         )
         return

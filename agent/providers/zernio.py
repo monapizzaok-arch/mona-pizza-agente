@@ -101,16 +101,19 @@ class ProveedorZernio(ProveedorWhatsApp):
 
         # sentVia=="human" es un mensaje saliente que alguien escribio a mano desde
         # el inbox de Zernio (no la API del agente). Cualquier otro message.sent
-        # (sentVia=="api", automatizaciones, etc.) es un eco de un envio que YA
-        # procesamos del lado de la propia API — no hay nada que hacer con eso.
+        # (sentVia=="api", "broadcast", "workflow", etc.) es un eco de un envio que
+        # YA procesamos del lado de la propia API — no hay nada que hacer con eso.
         if evento == "message.sent":
             if mensaje.get("sentVia") != "human":
                 return []
+            # El "sender" de un mensaje saliente es el propio negocio, no el cliente
+            # (documentado asi por Zernio) — el telefono del cliente sale de
+            # conversation.participantId, presente en el mismo payload.
+            conversacion = payload.get("conversation") or {}
+            telefono = (conversacion.get("participantId") or conversacion.get("participantUsername") or "").lstrip("+")
             return [
                 MensajeEntrante(
-                    # El "sender" de un mensaje saliente no es el cliente — el
-                    # telefono se resuelve despues en main.py via conversation_id.
-                    telefono="",
+                    telefono=telefono,
                     texto=mensaje.get("text") or "",
                     mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
                     es_propio=True,
