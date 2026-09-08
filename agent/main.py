@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import sys
+import unicodedata
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
@@ -25,12 +26,16 @@ from fastapi.responses import PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    esta_pausado,
+    guardar_conversacion,
     guardar_mensaje,
     inicializar_db,
     liberar_evento,
     limpiar_eventos_viejos,
     marcar_evento_procesado,
     obtener_historial,
+    obtener_telefono_de_conversacion,
+    set_pausado,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -38,6 +43,11 @@ from agent.providers.base import MensajeEntrante
 load_dotenv()
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+# Numero de WhatsApp (solo digitos, sin "+") desde el que el dueno/staff maneja a
+# Lisa por comandos (pausar/reanudar/estado) en vez de conversar con ella. Vacio =
+# la funcion queda deshabilitada, nadie puede pausarla por WhatsApp.
+ADMIN_WHATSAPP_NUMBER = (os.getenv("ADMIN_WHATSAPP_NUMBER") or "").lstrip("+").strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -156,7 +166,7 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
 
     encolados = 0
     for msg in mensajes:
-        if msg.es_propio or not msg.texto.strip():
+        if not msg.texto.strip():
             continue
 
         # La entrega es "al menos una vez": el mismo evento puede llegar dos veces
@@ -165,11 +175,90 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
             logger.info(f"Evento repetido, se ignora: {evento_id}")
             continue
 
+        if msg.enviado_por_humano:
+            # Alguien del local le escribio al cliente a mano desde el inbox. Lisa no
+            # tiene que contestar nada (ya se mando), pero si tiene que enterarse.
+            tareas.add_task(guardar_mensaje_humano, msg)
+            encolados += 1
+            continue
+
+        if msg.es_propio:
+            continue  # eco de un mensaje que ya mando la propia API (Lisa)
+
+        if ADMIN_WHATSAPP_NUMBER and msg.telefono == ADMIN_WHATSAPP_NUMBER:
+            logger.info(f"Comando del admin: {msg.texto}")
+            tareas.add_task(procesar_comando_admin, msg)
+            encolados += 1
+            continue
+
+        # Asociar el conversation_id con el telefono ANTES de encolar: si el local le
+        # contesta a mano casi en el acto, guardar_mensaje_humano ya lo puede resolver.
+        conversation_id = msg.contexto.get("conversation_id", "")
+        if conversation_id:
+            await guardar_conversacion(conversation_id, msg.telefono)
+
+        if await esta_pausado():
+            # Pausado: se guarda lo que dijo el cliente para no perder el hilo, pero
+            # no se le contesta -- alguien del local se esta ocupando a mano.
+            await guardar_mensaje(msg.telefono, "user", msg.texto)
+            logger.info(f"Lisa esta pausada: se guardo el mensaje de {msg.telefono} sin responder")
+            encolados += 1
+            continue
+
         logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
         tareas.add_task(procesar_mensaje, msg)
         encolados += 1
 
     return {"status": "ok", "encolados": encolados}
+
+
+async def guardar_mensaje_humano(msg: MensajeEntrante):
+    """
+    Guarda en la memoria de Lisa un mensaje que alguien del local escribio a mano desde
+    el inbox (no via la API). No genera ninguna respuesta -- ya se mando. Sin esto, la
+    proxima vez que Lisa le conteste a ese cliente no tendria ni idea de que el local ya
+    le dijo algo, y podria contradecirlo.
+    """
+    conversation_id = msg.contexto.get("conversation_id", "")
+    telefono = await obtener_telefono_de_conversacion(conversation_id)
+    if not telefono:
+        logger.warning(
+            f"Mensaje manual del local sin telefono resuelto (conversation_id={conversation_id}): "
+            "no se pudo guardar en la memoria de ningun cliente"
+        )
+        return
+    await guardar_mensaje(telefono, "assistant", msg.texto)
+    logger.info(f"Mensaje manual del local guardado en la memoria de {telefono}: {msg.texto}")
+
+
+def _normalizar_comando(texto: str) -> str:
+    """minusculas, sin tildes y sin puntuacion final, para que 'Pausar', 'PAUSA?' o 'pausá.' matcheen igual."""
+    t = texto.strip().lower().rstrip("?!.¿¡ ")
+    return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+
+
+async def procesar_comando_admin(msg: MensajeEntrante):
+    """
+    ADMIN_WHATSAPP_NUMBER no conversa con Lisa: le manda comandos de operacion.
+    No pasa por Claude -- se resuelve directo, mas rapido y sin gastar tokens.
+    """
+    comando = _normalizar_comando(msg.texto)
+
+    if comando in ("pausar", "pausa", "pause"):
+        await set_pausado(True)
+        respuesta = "Lisa quedo pausada: no va a responder a los clientes hasta que la reactives con 'reanudar'."
+    elif comando in ("reanudar", "activar", "resume", "reactivar"):
+        await set_pausado(False)
+        respuesta = "Lisa esta activa de nuevo."
+    elif comando in ("estado", "status"):
+        respuesta = "Lisa esta PAUSADA ahora mismo." if await esta_pausado() else "Lisa esta ACTIVA ahora mismo."
+    else:
+        respuesta = "No reconozco ese comando. Escribi 'pausar', 'reanudar' o 'estado'."
+
+    try:
+        await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudo responder el comando del admin: {e}")
 
 
 async def procesar_mensaje(msg: MensajeEntrante):

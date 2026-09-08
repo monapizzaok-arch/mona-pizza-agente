@@ -19,12 +19,17 @@ class MensajeEntrante:
     telefono: str            # Numero del remitente, solo digitos, sin "+"
     texto: str               # Contenido del mensaje
     mensaje_id: str          # Id del mensaje en la plataforma
-    es_propio: bool          # True si lo mando el agente (se ignora)
+    es_propio: bool          # True si es un mensaje saliente (de la API o de un humano)
     contexto: dict = field(default_factory=dict)
     # "contexto" lleva lo que cada proveedor necesita para poder responder:
     #   evento_id       -> id unico del evento, para no procesar dos veces lo mismo
     #   conversation_id -> Zernio: en que conversacion hay que responder
     #   account_id      -> Zernio: que cuenta de WhatsApp recibio el mensaje
+    enviado_por_humano: bool = False
+    # True solo cuando es_propio es un mensaje saliente que escribio una PERSONA a
+    # mano (ej. desde el inbox de Zernio), no la propia API del agente. Por ahora
+    # solo Zernio lo distingue (campo sentVia=="human"); Meta directo no tiene este
+    # concepto de inbox compartido, asi que siempre queda en False.
 
 
 class ProveedorWhatsApp(ABC):

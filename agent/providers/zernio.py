@@ -79,18 +79,45 @@ class ProveedorZernio(ProveedorWhatsApp):
         return True
 
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
-        """Normaliza el evento message.received de Zernio."""
+        """Normaliza los eventos message.received y message.sent de Zernio."""
         payload = await request.json()
 
         evento = payload.get("event")
-        if evento != "message.received":
-            # message.sent, message.delivered, message.read, etc. no se contestan
+        if evento not in ("message.received", "message.sent"):
+            # message.delivered, message.read, etc. no se contestan
             logger.debug(f"Evento ignorado: {evento}")
             return []
 
         mensaje = payload.get("message") or {}
         if mensaje.get("platform") != "whatsapp":
             return []
+
+        cuenta = payload.get("account") or {}
+        contexto = {
+            "evento_id": payload.get("id", ""),
+            "conversation_id": mensaje.get("conversationId", ""),
+            "account_id": cuenta.get("id", ""),
+        }
+
+        # sentVia=="human" es un mensaje saliente que alguien escribio a mano desde
+        # el inbox de Zernio (no la API del agente). Cualquier otro message.sent
+        # (sentVia=="api", automatizaciones, etc.) es un eco de un envio que YA
+        # procesamos del lado de la propia API — no hay nada que hacer con eso.
+        if evento == "message.sent":
+            if mensaje.get("sentVia") != "human":
+                return []
+            return [
+                MensajeEntrante(
+                    # El "sender" de un mensaje saliente no es el cliente — el
+                    # telefono se resuelve despues en main.py via conversation_id.
+                    telefono="",
+                    texto=mensaje.get("text") or "",
+                    mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
+                    es_propio=True,
+                    enviado_por_humano=True,
+                    contexto=contexto,
+                )
+            ]
 
         remitente = mensaje.get("sender") or {}
         # phoneNumber viene en E.164 con "+". Desde abril de 2026 puede faltar
@@ -100,8 +127,6 @@ class ProveedorZernio(ProveedorWhatsApp):
         if not telefono:
             telefono = remitente.get("businessScopedUserId") or remitente.get("id") or ""
 
-        cuenta = payload.get("account") or {}
-
         return [
             MensajeEntrante(
                 telefono=telefono,
@@ -109,11 +134,7 @@ class ProveedorZernio(ProveedorWhatsApp):
                 mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
                 # Zernio marca la direccion: solo contestamos lo que entra
                 es_propio=mensaje.get("direction") != "incoming",
-                contexto={
-                    "evento_id": payload.get("id", ""),
-                    "conversation_id": mensaje.get("conversationId", ""),
-                    "account_id": cuenta.get("id", ""),
-                },
+                contexto=contexto,
             )
         ]
 

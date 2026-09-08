@@ -64,6 +64,38 @@ class Mensaje(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
+class ConversacionTelefono(Base):
+    """
+    A que telefono corresponde cada conversation_id de Zernio.
+
+    Se completa cada vez que un cliente escribe (ese momento es el unico en que main.py
+    tiene los dos datos juntos). Sirve para resolver el telefono cuando llega un mensaje
+    SALIENTE escrito a mano desde el inbox: ese evento trae el conversation_id, pero no
+    el telefono del cliente (el "sender" ahi es el lado del negocio, no el cliente).
+    """
+
+    __tablename__ = "conversaciones_telefono"
+
+    conversation_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+class EstadoAgente(Base):
+    """
+    Un unico renglon (id=1) con el estado operativo del agente. Hoy solo guarda si
+    esta pausado; lo prende/apaga el comando que manda ADMIN_WHATSAPP_NUMBER (ver
+    main.py). Va en la base, no en una variable en memoria, para que sobreviva a un
+    reinicio o redespliegue del servidor.
+    """
+
+    __tablename__ = "estado_agente"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pausado: Mapped[bool] = mapped_column(default=False)
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
 class EventoProcesado(Base):
     """
     Eventos de webhook que ya se atendieron.
@@ -168,4 +200,48 @@ async def limpiar_historial(telefono: str):
     """Borra todo el historial de una conversacion."""
     async with async_session() as session:
         await session.execute(delete(Mensaje).where(Mensaje.telefono == telefono))
+        await session.commit()
+
+
+async def guardar_conversacion(conversation_id: str, telefono: str):
+    """Asocia un conversation_id de Zernio con el telefono del cliente que escribio."""
+    if not conversation_id or not telefono:
+        return
+    async with async_session() as session:
+        existente = await session.get(ConversacionTelefono, conversation_id)
+        if existente:
+            existente.telefono = telefono
+            existente.actualizado_en = ahora()
+        else:
+            session.add(
+                ConversacionTelefono(conversation_id=conversation_id, telefono=telefono, actualizado_en=ahora())
+            )
+        await session.commit()
+
+
+async def obtener_telefono_de_conversacion(conversation_id: str) -> str | None:
+    """Resuelve el telefono del cliente a partir del conversation_id de Zernio."""
+    if not conversation_id:
+        return None
+    async with async_session() as session:
+        fila = await session.get(ConversacionTelefono, conversation_id)
+        return fila.telefono if fila else None
+
+
+async def esta_pausado() -> bool:
+    """True si el admin pauso a Lisa: no responde pedidos, solo guarda lo que llega."""
+    async with async_session() as session:
+        fila = await session.get(EstadoAgente, 1)
+        return bool(fila.pausado) if fila else False
+
+
+async def set_pausado(valor: bool):
+    """Prende o apaga la pausa. Lo dispara el comando de ADMIN_WHATSAPP_NUMBER."""
+    async with async_session() as session:
+        fila = await session.get(EstadoAgente, 1)
+        if fila:
+            fila.pausado = valor
+            fila.actualizado_en = ahora()
+        else:
+            session.add(EstadoAgente(id=1, pausado=valor, actualizado_en=ahora()))
         await session.commit()
