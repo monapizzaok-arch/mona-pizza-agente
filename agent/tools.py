@@ -26,14 +26,12 @@ logger = logging.getLogger("agentkit")
 CARPETA_KNOWLEDGE = Path("knowledge")
 
 # El backend de Mona Pizza (LocalDB): mismo api.php que usa la web publica de pedidos.
-# guardarPedido es una accion publica, no requiere login ni API key.
+# guardarPedido, estadoApertura y menu son acciones publicas, no requieren login ni API key.
 LOCALDB_API_URL = os.getenv("LOCALDB_API_URL") or "https://monapizza.com.ar/api/api.php"
 
-# Costo de envio fijo. Coincide con lo que dice el prompt (config/prompts.yaml) y con
-# el valor que usa la web publica. Si el negocio lo cambia, hay que actualizarlo en los
-# dos lugares — no hay forma de consultarlo en vivo sin loguearse como personal
-# (configCobro exige sesion de staff, y Lisa no tiene una).
-COSTO_ENVIO = 1000.0
+# Fallback si por algun motivo el catalogo en vivo no trae costo_envio (no deberia pasar,
+# pero mejor tener un numero razonable que romper el calculo del pedido).
+COSTO_ENVIO_FALLBACK = 1000.0
 
 
 def cargar_info_negocio() -> dict:
@@ -125,6 +123,69 @@ def buscar_en_knowledge(consulta: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════
+# Catalogo en vivo (productos, precios, stock, config publica)
+# ════════════════════════════════════════════════════════════
+#
+# Mismo endpoint publico (accion=menu) que usa la web de pedidos para pintar el menu.
+# brain.py lo consulta en cada mensaje para mostrarle a Lisa el catalogo REAL (con los
+# ids que hay que usar en registrar_pedido) y que precios/stock esten siempre al dia,
+# aunque el texto estatico de prompts.yaml haya quedado viejo.
+
+
+async def obtener_menu(negocio: str = "monapizza") -> dict | None:
+    """Trae categorias/items/precios/stock y la config publica (envio, alias, etc.)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cliente:
+            r = await cliente.get(LOCALDB_API_URL, params={"accion": "menu", "negocio": negocio})
+        return r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"No se pudo consultar el catalogo en vivo: {e}")
+        return None
+
+
+def _fmt_precio(valor) -> str:
+    try:
+        return f"{float(valor):,.0f}".replace(",", ".")
+    except (TypeError, ValueError):
+        return str(valor)
+
+
+def formatear_catalogo(menu: dict) -> str:
+    """
+    Arma el bloque compacto que brain.py inyecta en el prompt: un renglon por producto
+    con su id real, cada variante con su precio, y si tiene stock. Ese id y el indice de
+    la variante son justo lo que despues recibe registrar_pedido — nada de inventar
+    nombres de producto nuevos.
+    """
+    lineas = []
+    for cat in menu.get("categorias", []):
+        etiquetas = cat.get("etiquetas", [])
+        items = cat.get("items", [])
+        if not items:
+            continue
+        lineas.append(f"[{cat.get('nombre', '')}]")
+        for it in items:
+            precios = it.get("precios", [])
+            partes = []
+            for i, p in enumerate(precios):
+                etiqueta = etiquetas[i] if i < len(etiquetas) else f"v{i}"
+                partes.append(f"{etiqueta}(idx {i})=${_fmt_precio(p)}")
+            marca = "" if it.get("stock") == "ok" else "  [SIN STOCK]"
+            lineas.append(f"  id={it.get('id')}  {it.get('nombre', '')}: {' / '.join(partes)}{marca}")
+    return "\n".join(lineas)
+
+
+def _indexar_catalogo(menu: dict) -> dict:
+    """{producto_id: {..., "_etiquetas": [...]}} para resolver items rapido."""
+    indice = {}
+    for cat in menu.get("categorias", []):
+        etiquetas = cat.get("etiquetas", [])
+        for it in cat.get("items", []):
+            indice[str(it.get("id"))] = {**it, "_etiquetas": etiquetas}
+    return indice
+
+
+# ════════════════════════════════════════════════════════════
 # Toma de pedidos
 # ════════════════════════════════════════════════════════════
 #
@@ -135,9 +196,12 @@ def buscar_en_knowledge(consulta: str) -> str:
 # revision manual — por eso brain.py solo la llama despues de que el cliente confirmo
 # productos, entrega, direccion (si aplica) y forma de pago.
 #
-# Los items ya vienen con el precio de cada linea CALCULADO por Lisa (ella conoce el
-# menu completo y las reglas de combos/mitad-y-mitad de config/prompts.yaml). Esta
-# funcion no vuelve a mirar precios: solo suma lo que le llega y arma el pedido.
+# A diferencia de la version anterior, esta funcion NO confia en un precio que le pase
+# Claude: cada item llega como referencia a un producto REAL del catalogo (producto_id +
+# variante_index, los mismos que ve en el bloque "Catalogo en vivo" del prompt) y aca se
+# vuelve a consultar el catalogo para sacar el precio y chequear el stock. Si algo no
+# existe o esta sin stock, se rechaza TODO el pedido con el motivo — no se registra nada
+# ni a medias.
 
 
 async def registrar_pedido(
@@ -156,22 +220,91 @@ async def registrar_pedido(
         telefono: numero de WhatsApp del cliente (lo agrega brain.py, no lo inventa Claude)
         nombre: nombre del cliente
         entrega: "Delivery" o "Retiro en local"
-        items: lista de {"nombre": str, "detalle": str, "cantidad": int, "precio": float}
-               — "precio" es el precio YA CALCULADO de esa linea completa (cantidad
-               incluida), no el precio unitario.
+        items: lista de productos, CADA UNO referenciando el catalogo real:
+               {
+                 "producto_id": "P1",       # id tal cual aparece en el catalogo en vivo
+                 "variante_index": 1,       # 0 = primera variante de ese producto, 1 = segunda, etc.
+                 "cantidad": 2,
+                 "producto_id_2": "P11",    # SOLO para pizza mitad y mitad: el id de la otra mitad
+               }
+               Para packs de empanadas (docena/media docena/unidad), cada tamanio va como
+               una linea separada del MISMO producto_id con distinto variante_index — no
+               se inventa un producto "8 empanadas".
         domicilio: direccion de entrega, obligatoria si entrega es "Delivery"
         pago: "Efectivo" o "Transferencia" (por WhatsApp no se ofrece Tarjeta)
         nota: aclaraciones del cliente (sin cebolla, timbre roto, etc.)
 
     Returns:
         {"ok": True, "id": <id del pedido>, "seguimiento": <link>} si se registro bien.
-        {"ok": False, "error": <motivo>} si el sistema lo rechazo (ej. local cerrado).
+        {"ok": False, "error": <motivo>} si algun producto no existe, no tiene stock, o
+        el sistema lo rechazo (ej. local cerrado) — no se registra nada en ese caso.
     """
     if not items:
         return {"ok": False, "error": "El pedido no tiene productos."}
 
-    subtotal = round(sum(float(i.get("precio") or 0) for i in items), 2)
-    envio = COSTO_ENVIO if "delivery" in entrega.lower() else 0.0
+    menu = await obtener_menu("monapizza")
+    if menu is None:
+        return {"ok": False, "error": "No pude consultar el catálogo para confirmar precios y stock. Probá de nuevo en un minuto."}
+
+    catalogo = _indexar_catalogo(menu)
+    lineas = []
+
+    for item in items:
+        pid = str(item.get("producto_id", ""))
+        try:
+            vidx = int(item.get("variante_index", 0))
+        except (TypeError, ValueError):
+            vidx = 0
+        try:
+            cantidad = max(1, int(item.get("cantidad", 1)))
+        except (TypeError, ValueError):
+            cantidad = 1
+        pid2 = item.get("producto_id_2")
+
+        prod = catalogo.get(pid)
+        if not prod:
+            return {"ok": False, "error": f"No encontré el producto \"{pid}\" en el catálogo actual. Puede haber cambiado — fijate en el catálogo en vivo."}
+        if prod.get("stock") != "ok":
+            return {"ok": False, "error": f"\"{prod.get('nombre')}\" no tiene stock en este momento, no lo puedo agregar al pedido."}
+        precios = prod.get("precios", [])
+        if vidx < 0 or vidx >= len(precios):
+            return {"ok": False, "error": f"\"{prod.get('nombre')}\" no tiene esa variante."}
+
+        precio_unit = float(precios[vidx])
+        nombre_linea = prod.get("nombre", "")
+        etiquetas = prod.get("_etiquetas", [])
+        variante_txt = etiquetas[vidx] if vidx < len(etiquetas) else ""
+
+        if pid2:
+            prod2 = catalogo.get(str(pid2))
+            if not prod2:
+                return {"ok": False, "error": f"No encontré el producto \"{pid2}\" en el catálogo actual."}
+            if prod2.get("stock") != "ok":
+                return {"ok": False, "error": f"\"{prod2.get('nombre')}\" no tiene stock en este momento, no lo puedo agregar al pedido."}
+            precios2 = prod2.get("precios", [])
+            if vidx < 0 or vidx >= len(precios2):
+                return {"ok": False, "error": f"\"{prod2.get('nombre')}\" no tiene esa variante."}
+            precio_unit += float(precios2[vidx])
+            nombre_linea = f"{nombre_linea} + {prod2.get('nombre', '')}"
+
+        lineas.append(
+            {
+                "nombre": nombre_linea,
+                "detalle": variante_txt or None,
+                "cantidad": cantidad,
+                "precio": round(precio_unit * cantidad, 2),
+                "producto_id": pid,
+                "variante_index": vidx,
+            }
+        )
+
+    subtotal = round(sum(l["precio"] for l in lineas), 2)
+    config = menu.get("config", {})
+    try:
+        costo_envio_config = float(config.get("costo_envio") or COSTO_ENVIO_FALLBACK)
+    except (TypeError, ValueError):
+        costo_envio_config = COSTO_ENVIO_FALLBACK
+    envio = costo_envio_config if "delivery" in entrega.lower() else 0.0
     total = subtotal + envio
 
     payload = {
@@ -180,15 +313,7 @@ async def registrar_pedido(
         "entrega": entrega,
         "domicilio": domicilio,
         "pago": pago,
-        "items": [
-            {
-                "nombre": i.get("nombre", ""),
-                "detalle": i.get("detalle") or None,
-                "cantidad": i.get("cantidad", 1),
-                "precio": float(i.get("precio") or 0),
-            }
-            for i in items
-        ],
+        "items": lineas,
         "subtotal": subtotal,
         "envio": envio,
         "descuento": 0,

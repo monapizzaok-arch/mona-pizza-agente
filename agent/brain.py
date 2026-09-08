@@ -6,6 +6,7 @@ Logica de IA del agente. Lee el system prompt de config/prompts.yaml y genera la
 respuestas con la API de Anthropic.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent.tools import consultar_estado_negocio, registrar_pedido
+from agent.tools import consultar_estado_negocio, formatear_catalogo, obtener_menu, registrar_pedido
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -39,7 +40,9 @@ TOOLS = [
             "revision manual despues. Llamala SOLO una vez, y solo cuando el cliente ya "
             "confirmo en firme: los productos con sus tamanios/cantidades, si es delivery "
             "o retiro (con la direccion si es delivery), la forma de pago, y viste el "
-            "resumen con el total. No la llames para cotizar o simular un pedido."
+            "resumen con el total. No la llames para cotizar o simular un pedido. Cada "
+            "item tiene que referenciar un producto REAL del bloque 'Catalogo en vivo' "
+            "del prompt (por su id) — nunca inventes un producto ni un precio."
         ),
         "input_schema": {
             "type": "object",
@@ -61,26 +64,33 @@ TOOLS = [
                 "items": {
                     "type": "array",
                     "description": (
-                        "Cada linea del pedido, con el precio YA CALCULADO por vos "
-                        "(aplicando el combo mas economico de empanadas y la regla de "
-                        "mitad y mitad si corresponde). 'precio' es el total de esa "
-                        "linea, no el precio unitario."
+                        "Cada linea referencia un producto del catalogo en vivo por su id "
+                        "real (ej. 'P1', 'e1', 'c3'). Para un pack de empanadas (docena / "
+                        "media docena / unidad), agregá una linea por cada tamaño, todas "
+                        "con el mismo producto_id y el variante_index que corresponda — "
+                        "NUNCA un producto inventado tipo '8 empanadas'. Para una pizza "
+                        "mitad y mitad, una sola linea con producto_id (la primera mitad) "
+                        "+ producto_id_2 (la segunda mitad), variante_index apuntando a "
+                        "'Media' en las dos."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "nombre": {"type": "string"},
-                            "detalle": {
+                            "producto_id": {
                                 "type": "string",
-                                "description": "Tamanio o variante, ej. 'Entera', 'Media Pepperoni + Media Muzzarella', '1 docena'",
+                                "description": "Id del producto tal cual figura en el catalogo en vivo (ej. 'P1')",
                             },
-                            "cantidad": {"type": "integer"},
-                            "precio": {
-                                "type": "number",
-                                "description": "Precio total de la linea, combo/mitad-y-mitad ya aplicado",
+                            "variante_index": {
+                                "type": "integer",
+                                "description": "Indice de la variante elegida dentro de ese producto (0 = primera variante listada, 1 = segunda, etc.)",
+                            },
+                            "cantidad": {"type": "integer", "description": "Cuantas unidades de ESTA linea (producto+variante)"},
+                            "producto_id_2": {
+                                "type": "string",
+                                "description": "Solo para pizza mitad y mitad: id del producto de la segunda mitad. Omitilo si no es un combo.",
                             },
                         },
-                        "required": ["nombre", "cantidad", "precio"],
+                        "required": ["producto_id", "variante_index", "cantidad"],
                     },
                 },
                 "nota": {
@@ -168,6 +178,8 @@ async def _ejecutar_tool(nombre: str, argumentos: dict, telefono: str) -> dict:
     tenga que adivinar o pueda inventar mal.
     """
     if nombre == "registrar_pedido":
+        # producto_id_2 no viaja como kwarg propio: cada item de la lista ya lo trae
+        # (o no) tal cual lo mando Claude, y registrar_pedido lo lee de ahi adentro.
         return await registrar_pedido(
             telefono=telefono,
             nombre=argumentos.get("nombre", ""),
@@ -223,11 +235,11 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
 
     system_prompt = cargar_system_prompt()
 
-    # Estado del local EN VIVO (el mismo horario que se carga en admin.html), no el
-    # texto estatico del prompt: asi Lisa no tiene que calcular ella sola si esta
-    # dentro de horario. Si la consulta falla, no se agrega nada y el modelo cae al
-    # horario estatico de mas arriba en el prompt.
-    estado_negocio = await consultar_estado_negocio()
+    # Estado del local y catalogo, los dos EN VIVO (mismo horario/stock/precios que
+    # admin.html), no lo que diga el texto estatico del prompt de mas arriba. Las dos
+    # consultas son independientes asi que van en paralelo.
+    estado_negocio, menu = await asyncio.gather(consultar_estado_negocio(), obtener_menu("monapizza"))
+
     if estado_negocio.get("abierto") is not None:
         system_prompt += (
             "\n\n## Estado del local ahora mismo (en vivo — tiene prioridad sobre el horario de arriba)\n"
@@ -237,6 +249,21 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
             "Si esta CERRADO: segui respondiendo preguntas del menu con normalidad, pero NO tomes "
             "ni registres ningun pedido. Explicale al cliente que ahora mismo no podemos tomar "
             "pedidos y cuando volvemos a abrir, usando el mensaje de arriba."
+        )
+
+    if menu is not None:
+        config = menu.get("config", {})
+        alias = config.get("cbu_alias") or config.get("cbu") or config.get("alias") or ""
+        system_prompt += (
+            "\n\n## Catálogo en vivo (fuente real de precios, stock e ids — el menú de más "
+            "arriba en este prompt es solo referencia de ingredientes/sabores y puede tener "
+            "precios viejos)\n"
+            f"{formatear_catalogo(menu)}\n\n"
+            f"Alias/CBU para transferencias: {alias or '(no hay uno cargado — si el cliente pide pagar por transferencia, avisale que le vas a confirmar el dato)'}\n\n"
+            "Para armar cada item de registrar_pedido usá el id real de acá (producto_id) y "
+            "la posición de la variante elegida (variante_index: 0 = la primera de la lista "
+            "para ese producto, 1 = la segunda, etc.). Un producto marcado SIN STOCK no se "
+            "ofrece ni se agrega a ningún pedido — decile al cliente que por ahora no hay."
         )
 
     extras = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
