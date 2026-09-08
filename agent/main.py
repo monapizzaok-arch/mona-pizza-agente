@@ -26,13 +26,17 @@ from fastapi.responses import PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    agregar_aviso,
+    borrar_avisos,
     esta_pausado,
     guardar_conversacion,
     guardar_mensaje,
     inicializar_db,
     liberar_evento,
+    limpiar_avisos_viejos,
     limpiar_eventos_viejos,
     marcar_evento_procesado,
+    obtener_avisos_vigentes,
     obtener_historial,
     obtener_telefono_de_conversacion,
     set_pausado,
@@ -86,6 +90,7 @@ async def lifespan(app: FastAPI):
     """Prepara la base de datos y chequea el proveedor al arrancar."""
     await inicializar_db()
     await limpiar_eventos_viejos()
+    await limpiar_avisos_viejos()
     logger.info("Base de datos lista")
     logger.info(f"Servidor AgentKit escuchando en el puerto {PORT}")
 
@@ -311,8 +316,32 @@ async def procesar_comando_admin(msg: MensajeEntrante):
                 recorte = 300 if cantidad <= 10 else 120
                 lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:recorte]}" for h in historial]
                 respuesta = f"Ultimos {len(historial)} mensajes de {telefono_consulta}:\n\n" + "\n\n".join(lineas)
+    elif comando.startswith("aviso"):
+        # "/aviso <texto>" carga algo que Lisa tiene que tener en cuenta SOLO hoy (se
+        # inyecta en su prompt en cada mensaje, ver brain.py) sin tocar prompts.yaml ni
+        # hacer un deploy: "nos quedamos sin rucula", "ofrece primero la promo x3".
+        # No se usa _normalizar_comando acá para el texto: mancharia mayusculas y
+        # tildes del aviso real.
+        resto = texto_comando[len("aviso"):].lstrip(":").strip()
+        resto_norm = _normalizar_comando(resto)
+        if resto_norm in ("", "ver", "listar"):
+            avisos = await obtener_avisos_vigentes()
+            respuesta = (
+                ("Avisos de hoy:\n\n" + "\n".join(f"- {a}" for a in avisos))
+                if avisos
+                else "No hay avisos cargados para hoy. Usa: /aviso <texto>"
+            )
+        elif resto_norm in ("borrar", "limpiar", "quitar"):
+            await borrar_avisos()
+            respuesta = "Avisos borrados."
+        else:
+            await agregar_aviso(resto)
+            respuesta = f'Listo, Lisa ya sabe: "{resto}". Vale solo por hoy.'
     else:
-        respuesta = "No reconozco ese comando. Escribi /pausar, /reanudar, /estado o /historial <telefono>."
+        respuesta = (
+            "No reconozco ese comando. Escribi /pausar, /reanudar, /estado, "
+            "/historial <telefono> o /aviso <texto>."
+        )
 
     try:
         await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)

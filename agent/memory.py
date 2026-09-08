@@ -105,6 +105,22 @@ class EstadoAgente(Base):
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
+class AvisoDelDia(Base):
+    """
+    Avisos que carga el local por WhatsApp (comando /aviso) para que Lisa los tenga en
+    cuenta al tomar pedidos -- "nos quedamos sin rucula hoy", "ofrece primero la promo
+    x3" -- sin tocar config/prompts.yaml ni hacer un deploy. Valen SOLO el dia en que se
+    cargaron (obtener_avisos_vigentes filtra por fecha), asi que si el local se olvida
+    de borrarlos no arrastran para el dia siguiente.
+    """
+
+    __tablename__ = "avisos_del_dia"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    texto: Mapped[str] = mapped_column(Text)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
 class EventoProcesado(Base):
     """
     Eventos de webhook que ya se atendieron.
@@ -253,4 +269,42 @@ async def set_pausado(valor: bool):
             fila.actualizado_en = ahora()
         else:
             session.add(EstadoAgente(id=1, pausado=valor, actualizado_en=ahora()))
+        await session.commit()
+
+
+# Zona horaria del local (America/Argentina/Salta, UTC-3 todo el ano, sin horario de
+# verano) -- coincide con la que fija api.php de LocalDB. "Vigente hoy" se decide con
+# la fecha ahi, no en UTC: un aviso cargado a las 23:50 hora Argentina ya seria "manana"
+# en UTC, y se perderia de dia por una diferencia de huso horario, no de tiempo real.
+TZ_NEGOCIO = timezone(timedelta(hours=-3))
+
+
+async def agregar_aviso(texto: str):
+    """Carga un aviso del dia (comando /aviso <texto> de ADMIN_WHATSAPP_NUMBER)."""
+    async with async_session() as session:
+        session.add(AvisoDelDia(texto=texto, creado_en=ahora()))
+        await session.commit()
+
+
+async def obtener_avisos_vigentes() -> list[str]:
+    """Avisos cargados HOY (hora Argentina), en el orden en que se cargaron."""
+    hoy = ahora().astimezone(TZ_NEGOCIO).date()
+    async with async_session() as session:
+        resultado = await session.execute(select(AvisoDelDia).order_by(AvisoDelDia.id))
+        avisos = list(resultado.scalars().all())
+    return [a.texto for a in avisos if a.creado_en.astimezone(TZ_NEGOCIO).date() == hoy]
+
+
+async def borrar_avisos():
+    """Borra TODOS los avisos guardados (comando /aviso borrar)."""
+    async with async_session() as session:
+        await session.execute(delete(AvisoDelDia))
+        await session.commit()
+
+
+async def limpiar_avisos_viejos(dias: int = 3):
+    """Borra avisos de hace mas de N dias para que la tabla no crezca sin fin."""
+    limite = ahora() - timedelta(days=dias)
+    async with async_session() as session:
+        await session.execute(delete(AvisoDelDia).where(AvisoDelDia.creado_en < limite))
         await session.commit()

@@ -15,6 +15,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
+from agent.memory import obtener_avisos_vigentes
 from agent.tools import consultar_estado_negocio, formatear_catalogo, obtener_menu, registrar_pedido
 
 load_dotenv()
@@ -236,10 +237,13 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
 
     system_prompt = cargar_system_prompt()
 
-    # Estado del local y catalogo, los dos EN VIVO (mismo horario/stock/precios que
-    # admin.html), no lo que diga el texto estatico del prompt de mas arriba. Las dos
-    # consultas son independientes asi que van en paralelo.
-    estado_negocio, menu = await asyncio.gather(consultar_estado_negocio(), obtener_menu("monapizza"))
+    # Estado del local, catalogo y avisos del dia, todo EN VIVO (mismo horario/stock/
+    # precios que admin.html, mas lo que haya cargado el local por /aviso), no lo que
+    # diga el texto estatico del prompt de mas arriba. Las tres consultas son
+    # independientes asi que van en paralelo.
+    estado_negocio, menu, avisos = await asyncio.gather(
+        consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes()
+    )
 
     if estado_negocio.get("abierto") is not None:
         system_prompt += (
@@ -250,6 +254,13 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
             "Si esta CERRADO: segui respondiendo preguntas del menu con normalidad, pero NO tomes "
             "ni registres ningun pedido. Explicale al cliente que ahora mismo no podemos tomar "
             "pedidos y cuando volvemos a abrir, usando el mensaje de arriba."
+        )
+
+    if avisos:
+        system_prompt += (
+            "\n\n## Avisos de hoy (cargados por el local, valen SOLO por hoy — tienen "
+            "prioridad sobre el catálogo y el menú de más arriba si se contradicen)\n"
+            + "\n".join(f"- {a}" for a in avisos)
         )
 
     if menu is not None:
