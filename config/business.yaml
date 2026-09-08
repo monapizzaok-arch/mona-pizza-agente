@@ -1,0 +1,23 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "Mona Pizza"
+  descripcion: >
+    Pizzería especializada en pizza a la piedra, empanadas y calzones.
+    Masa de 48 horas de fermentación, horneada a alta temperatura directo
+    sobre el piso del horno. Ubicada en Río Piedras (E) 59, Metán, Salta.
+    Atiende por delivery (envío $1.000) y retiro en el local (takeaway).
+    Tiene tarjeta de fidelidad: un sello por cada pizza comprada, canjeable
+    por premios al completarla.
+  horario: "Miércoles a Sábado 20:30 a 00:00 hs. Domingo 20:30 a 23:30 hs. Lunes y Martes cerrado."
+
+agente:
+  nombre: "Lisa"
+  tono: "amigable y casual"
+  casos_de_uso:
+    - "Responder preguntas frecuentes (menú, precios, horarios, ubicación, delivery)"
+    - "Tomar pedidos de pizzas, empanadas y calzones"
+
+metadata:
+  creado: "2026-09-08"
+  proveedor: "zernio"
+  version: "2.0"
