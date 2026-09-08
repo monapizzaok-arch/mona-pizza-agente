@@ -191,7 +191,10 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
         if msg.es_propio:
             continue  # eco de un mensaje que ya mando la propia API (Lisa)
 
-        if ADMIN_WHATSAPP_NUMBER and msg.telefono == ADMIN_WHATSAPP_NUMBER:
+        # El "\\" al principio es lo que distingue un comando de un mensaje normal.
+        # Sin el prefijo, ADMIN_WHATSAPP_NUMBER es un cliente mas y habla con Lisa
+        # como cualquiera -- asi el mismo numero sirve para probar Y para operar.
+        if ADMIN_WHATSAPP_NUMBER and msg.telefono == ADMIN_WHATSAPP_NUMBER and msg.texto.strip().startswith("\\"):
             logger.info(f"Comando del admin: {msg.texto}")
             tareas.add_task(procesar_comando_admin, msg)
             encolados += 1
@@ -251,27 +254,29 @@ def _normalizar_comando(texto: str) -> str:
 
 async def procesar_comando_admin(msg: MensajeEntrante):
     """
-    ADMIN_WHATSAPP_NUMBER no conversa con Lisa: le manda comandos de operacion.
-    No pasa por Claude -- se resuelve directo, mas rapido y sin gastar tokens.
+    ADMIN_WHATSAPP_NUMBER manda comandos con un "\\" adelante (\\pausar, \\estado,
+    \\historial ...). No pasa por Claude -- se resuelve directo, mas rapido y sin
+    gastar tokens. Sin el "\\" el mismo numero es un cliente mas (ver webhook_handler).
     """
-    comando = _normalizar_comando(msg.texto)
+    texto_comando = msg.texto.strip().lstrip("\\").strip()
+    comando = _normalizar_comando(texto_comando)
 
     if comando in ("pausar", "pausa", "pause"):
         await set_pausado(True)
-        respuesta = "Lisa quedo pausada: no va a responder a los clientes hasta que la reactives con 'reanudar'."
+        respuesta = "Lisa quedo pausada: no va a responder a los clientes hasta que la reactives con '\\reanudar'."
     elif comando in ("reanudar", "activar", "resume", "reactivar"):
         await set_pausado(False)
         respuesta = "Lisa esta activa de nuevo."
     elif comando in ("estado", "status"):
         respuesta = "Lisa esta PAUSADA ahora mismo." if await esta_pausado() else "Lisa esta ACTIVA ahora mismo."
     elif comando.startswith("historial"):
-        # Diagnostico: "historial 5493876403872" muestra lo que Lisa tiene guardado
+        # Diagnostico: "\historial 5493876403872" muestra lo que Lisa tiene guardado
         # de ese telefono -- util para confirmar que un mensaje manual quedo bien
         # guardado, sin tener que mirar la base de datos directamente.
-        partes = msg.texto.strip().split(maxsplit=1)
+        partes = texto_comando.split(maxsplit=1)
         telefono_consulta = partes[1].strip().lstrip("+") if len(partes) > 1 else ""
         if not telefono_consulta:
-            respuesta = "Usa: historial <telefono>, ej. historial 5493876403872"
+            respuesta = "Usa: \\historial <telefono>, ej. \\historial 5493876403872"
         else:
             historial = await obtener_historial(telefono_consulta, limite=10)
             if not historial:
@@ -280,7 +285,7 @@ async def procesar_comando_admin(msg: MensajeEntrante):
                 lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:200]}" for h in historial]
                 respuesta = f"Ultimos {len(historial)} mensajes de {telefono_consulta}:\n\n" + "\n\n".join(lineas)
     else:
-        respuesta = "No reconozco ese comando. Escribi 'pausar', 'reanudar', 'estado' o 'historial <telefono>'."
+        respuesta = "No reconozco ese comando. Escribi \\pausar, \\reanudar, \\estado o \\historial <telefono>."
 
     try:
         await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
