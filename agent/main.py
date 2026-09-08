@@ -123,6 +123,11 @@ async def health_check():
         "commit": COMMIT,
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
+        # Bool + ultimos 4 digitos, no el numero completo: este endpoint es publico.
+        # Sirve para confirmar con un curl si ADMIN_WHATSAPP_NUMBER de verdad le llego
+        # al proceso corriendo, sin tener que ir a mirar las Variables de Railway.
+        "admin_configurado": bool(ADMIN_WHATSAPP_NUMBER),
+        "admin_termina_en": ADMIN_WHATSAPP_NUMBER[-4:] if ADMIN_WHATSAPP_NUMBER else None,
     }
 
 
