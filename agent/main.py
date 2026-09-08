@@ -236,8 +236,11 @@ async def guardar_mensaje_humano(msg: MensajeEntrante):
             "no se pudo guardar en la memoria de ningun cliente"
         )
         return
-    await guardar_mensaje(telefono, "assistant", msg.texto)
-    logger.info(f"Mensaje manual del local guardado en la memoria de {telefono}: {msg.texto}")
+    try:
+        await guardar_mensaje(telefono, "assistant", msg.texto)
+        logger.info(f"Mensaje manual del local guardado en la memoria de {telefono}: {msg.texto}")
+    except Exception as e:  # noqa: BLE001 — esto corre en background, si explota que quede en el log
+        logger.exception(f"No se pudo guardar el mensaje manual de {telefono}: {e}")
 
 
 def _normalizar_comando(texto: str) -> str:
@@ -261,8 +264,23 @@ async def procesar_comando_admin(msg: MensajeEntrante):
         respuesta = "Lisa esta activa de nuevo."
     elif comando in ("estado", "status"):
         respuesta = "Lisa esta PAUSADA ahora mismo." if await esta_pausado() else "Lisa esta ACTIVA ahora mismo."
+    elif comando.startswith("historial"):
+        # Diagnostico: "historial 5493876403872" muestra lo que Lisa tiene guardado
+        # de ese telefono -- util para confirmar que un mensaje manual quedo bien
+        # guardado, sin tener que mirar la base de datos directamente.
+        partes = msg.texto.strip().split(maxsplit=1)
+        telefono_consulta = partes[1].strip().lstrip("+") if len(partes) > 1 else ""
+        if not telefono_consulta:
+            respuesta = "Usa: historial <telefono>, ej. historial 5493876403872"
+        else:
+            historial = await obtener_historial(telefono_consulta, limite=10)
+            if not historial:
+                respuesta = f"No hay nada guardado para {telefono_consulta}."
+            else:
+                lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:200]}" for h in historial]
+                respuesta = f"Ultimos {len(historial)} mensajes de {telefono_consulta}:\n\n" + "\n\n".join(lineas)
     else:
-        respuesta = "No reconozco ese comando. Escribi 'pausar', 'reanudar' o 'estado'."
+        respuesta = "No reconozco ese comando. Escribi 'pausar', 'reanudar', 'estado' o 'historial <telefono>'."
 
     try:
         await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
