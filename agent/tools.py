@@ -47,11 +47,56 @@ def cargar_info_negocio() -> dict:
 
 
 def obtener_horario() -> dict:
-    """Retorna el horario de atencion del negocio."""
+    """Retorna el horario de atencion del negocio (texto estatico, ver tambien consultar_estado_negocio)."""
     info = cargar_info_negocio()
     return {
         "horario": info.get("negocio", {}).get("horario", "No disponible"),
         "esta_abierto": True,  # TODO: calcular segun la hora actual y el horario
+    }
+
+
+async def consultar_estado_negocio() -> dict:
+    """
+    Consulta EN VIVO si el local esta abierto ahora mismo, segun el horario que carga
+    el mostrador en admin.html (tabla `horarios` de LocalDB) — la misma consulta
+    (accion publica estadoApertura) que hace la web de pedidos antes de dejar
+    completar un pedido. brain.py la llama en cada mensaje para que Lisa sepa si puede
+    tomar pedidos ahora mismo, sin depender de que el propio modelo calcule la hora.
+
+    Devuelve {"abierto": bool, "mensaje": str, "retiro": bool, "delivery": bool}.
+    Si la consulta falla (red caida, etc.), "abierto" es None: quien la use debe caer
+    al horario estatico del prompt en vez de asumir que esta abierto o cerrado.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as cliente:
+            r = await cliente.get(
+                LOCALDB_API_URL,
+                params={"accion": "estadoApertura", "negocio": "monapizza"},
+            )
+        estado = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"No se pudo consultar el estado de apertura en vivo: {e}")
+        return {"abierto": None, "mensaje": "", "retiro": True, "delivery": True}
+
+    if estado.get("pausado"):
+        mensaje = estado.get("mensaje") or "Por el momento no estamos tomando pedidos por la web."
+    elif estado.get("abierto"):
+        cierra = (estado.get("cierra") or "")[:5]
+        mensaje = f"Abierto ahora mismo{f', cerramos a las {cierra}' if cierra else ''}."
+    else:
+        apertura = estado.get("apertura")
+        if apertura:
+            cuando = estado.get("apertura_cuando")
+            cuando_txt = "" if cuando in (None, "hoy") else f"{cuando} "
+            mensaje = f"Cerrado en este momento. Abrimos {cuando_txt}a las {apertura[:5]}."
+        else:
+            mensaje = "Cerrado por el momento, todavia no hay horario de reapertura cargado."
+
+    return {
+        "abierto": bool(estado.get("abierto")) and not estado.get("pausado"),
+        "mensaje": mensaje,
+        "retiro": estado.get("retiro", True),
+        "delivery": estado.get("delivery", True),
     }
 
 

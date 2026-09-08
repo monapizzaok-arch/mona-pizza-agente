@@ -14,7 +14,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent.tools import registrar_pedido
+from agent.tools import consultar_estado_negocio, registrar_pedido
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -222,6 +222,23 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
     mensajes.append({"role": "user", "content": mensaje})
 
     system_prompt = cargar_system_prompt()
+
+    # Estado del local EN VIVO (el mismo horario que se carga en admin.html), no el
+    # texto estatico del prompt: asi Lisa no tiene que calcular ella sola si esta
+    # dentro de horario. Si la consulta falla, no se agrega nada y el modelo cae al
+    # horario estatico de mas arriba en el prompt.
+    estado_negocio = await consultar_estado_negocio()
+    if estado_negocio.get("abierto") is not None:
+        system_prompt += (
+            "\n\n## Estado del local ahora mismo (en vivo — tiene prioridad sobre el horario de arriba)\n"
+            f"{'ABIERTO' if estado_negocio['abierto'] else 'CERRADO'}. {estado_negocio['mensaje']}\n"
+            f"Retiro disponible: {'si' if estado_negocio['retiro'] else 'no'}. "
+            f"Delivery disponible: {'si' if estado_negocio['delivery'] else 'no'}.\n"
+            "Si esta CERRADO: segui respondiendo preguntas del menu con normalidad, pero NO tomes "
+            "ni registres ningun pedido. Explicale al cliente que ahora mismo no podemos tomar "
+            "pedidos y cuando volvemos a abrir, usando el mensaje de arriba."
+        )
+
     extras = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
 
     async def _llamar(parametros_extra: dict):
