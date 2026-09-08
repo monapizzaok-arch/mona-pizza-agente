@@ -246,7 +246,12 @@ async def guardar_mensaje_humano(msg: MensajeEntrante):
         )
         return
     try:
-        await guardar_mensaje(telefono, "assistant", msg.texto)
+        # Mismo candado por telefono que usa procesar_mensaje: sin el, este guardado
+        # puede pisarse con la escritura de un mensaje normal que llegue casi al
+        # mismo tiempo -- SQLite solo deja un escritor a la vez, y las dos corren
+        # como background tasks independientes, sin ningun orden garantizado entre si.
+        async with _candados[telefono]:
+            await guardar_mensaje(telefono, "assistant", msg.texto)
         logger.info(f"Mensaje manual del local guardado en la memoria de {telefono}: {msg.texto}")
     except Exception as e:  # noqa: BLE001 — esto corre en background, si explota que quede en el log
         logger.exception(f"No se pudo guardar el mensaje manual de {telefono}: {e}")

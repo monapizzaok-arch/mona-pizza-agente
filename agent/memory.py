@@ -39,7 +39,16 @@ if DATABASE_URL.startswith("sqlite") and os.getenv("ENVIRONMENT") == "production
         "Agrega PostgreSQL y configura DATABASE_URL para que el agente recuerde a sus clientes."
     )
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+# SQLite solo deja UN escritor a la vez en todo el archivo (no por fila, por tabla).
+# Sin "timeout", una segunda escritura que llega mientras otra sigue abierta explota
+# al toque con "database is locked" en vez de esperar. Con varias conversaciones
+# entrando a la vez (o el guardado de un mensaje manual del inbox corriendo casi
+# junto con el de un mensaje normal), esto pasa de verdad. El timeout hace que
+# espere hasta 15s a que se libere en vez de fallar de una. No aplica a Postgres
+# (produccion real), que maneja escrituras concurrentes sin este problema.
+_connect_args = {"timeout": 15} if DATABASE_URL.startswith("sqlite") else {}
+
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True, connect_args=_connect_args)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
