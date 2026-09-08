@@ -103,18 +103,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=lifespan)
 
+# Railway define esta variable sola en cada deploy (no hay que configurarla a mano).
+# Se expone en el health check para saber CON CERTEZA que commit esta corriendo en
+# produccion, en vez de adivinar mirando el dashboard o probando por WhatsApp.
+COMMIT = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or "local"
+
 
 @app.get("/")
 async def health_check():
     """Endpoint de salud para Railway y monitoreo."""
     if error_configuracion:
-        return {"status": "error", "service": "agentkit", "detalle": error_configuracion}
+        return {"status": "error", "service": "agentkit", "commit": COMMIT, "detalle": error_configuracion}
 
     # Se responde 200 aunque las credenciales esten mal, para que Railway no marque el
     # deploy como caido y puedas leer el diagnostico. El detalle esta en el cuerpo.
     return {
         "status": "ok" if estado_proveedor["ok"] else "degradado",
         "service": "agentkit",
+        "commit": COMMIT,
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
     }
