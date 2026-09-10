@@ -16,7 +16,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent.memory import obtener_avisos_vigentes
+from agent.memory import obtener_avisos_vigentes, obtener_datos
 from agent.tools import consultar_estado_negocio, formatear_catalogo, obtener_menu, registrar_pedido
 
 load_dotenv()
@@ -273,11 +273,21 @@ async def generar_respuesta(
     # asi que van en paralelo. Si quien llama ya consulto el estado del local (main.py
     # lo necesita antes, para decidir si contestar), lo pasa y no se vuelve a pedir.
     if estado_negocio is None:
-        estado_negocio, menu, avisos = await asyncio.gather(
-            consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes()
+        estado_negocio, menu, avisos, datos = await asyncio.gather(
+            consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes(), obtener_datos()
         )
     else:
-        menu, avisos = await asyncio.gather(obtener_menu("monapizza"), obtener_avisos_vigentes())
+        menu, avisos, datos = await asyncio.gather(
+            obtener_menu("monapizza"), obtener_avisos_vigentes(), obtener_datos()
+        )
+
+    if datos:
+        system_prompt += (
+            "\n\n## Lo que el local te fue enseñando (vale siempre, hasta que lo saquen)\n"
+            + "\n".join(f"- {t}" for _, t in datos)
+            + "\nSi algo de acá contradice el menú o la descripción del negocio de más "
+            "arriba, mandá esto: lo cargó el local después, sabiendo lo que decía el prompt."
+        )
 
     if avisos:
         system_prompt += (

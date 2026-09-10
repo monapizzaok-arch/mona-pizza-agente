@@ -28,8 +28,11 @@ from fastapi.responses import PlainTextResponse
 from agent.brain import MODELO, generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     agregar_aviso,
+    agregar_dato,
     borrar_avisos,
+    borrar_dato,
     esta_pausado,
+    obtener_datos,
     set_silencio_cerrado,
     silencio_cerrado_activo,
     guardar_conversacion,
@@ -409,6 +412,13 @@ COMANDOS = [
         "que_hace": "Algo que Lisa tiene que tener en cuenta SOLO HOY (ej: 'nos quedamos sin rucula'). Se olvida solo manana.",
     },
     {
+        "nombre": "dato",
+        "alias": ("dato", "datos", "recordar"),
+        "con_argumentos": True,
+        "uso": "/dato <texto>  ·  /dato ver  ·  /dato borrar <n>",
+        "que_hace": "Algo que Lisa tiene que saber SIEMPRE (ej: 'no hacemos envios a zona sur'). No vence: se borra a mano.",
+    },
+    {
         "nombre": "historial",
         "alias": ("historial",),
         "con_argumentos": True,
@@ -418,11 +428,17 @@ COMANDOS = [
 ]
 
 
+# Lo que puede venir pegado despues de un comando con argumentos: "/dato: la promo..."
+# es tan natural de escribir como "/dato la promo...". Sin esto el comando no se
+# reconoce y termina contestando Claude como si fuera un cliente.
+_SEPARADORES = (" ", ":", ",", "-", "=")
+
+
 def _resolver_comando(comando: str) -> str | None:
     """Del texto normalizado al nombre canonico del comando. None si no se reconoce."""
     for c in COMANDOS:
         if c["con_argumentos"]:
-            if any(comando == a or comando.startswith(a + " ") for a in c["alias"]):
+            if any(comando == a or comando[len(a) : len(a) + 1] in _SEPARADORES and comando.startswith(a) for a in c["alias"]):
                 return c["nombre"]
         elif comando in c["alias"]:
             return c["nombre"]
@@ -485,6 +501,37 @@ async def procesar_comando_admin(msg: MensajeEntrante):
         else:
             actual = "ACTIVADO" if await silencio_cerrado_activo() else "DESACTIVADO"
             respuesta = f"Silencio fuera de horario: {actual}. Usa /silencio on o /silencio off."
+    elif nombre == "dato":
+        # Hermano permanente de /aviso: lo que se carga aca vale hasta que lo borren.
+        # Se numeran para poder sacar uno solo -- con el tiempo se acumulan, y un
+        # "borrar todo" como el de /aviso seria destructivo.
+        resto = texto_comando.split(maxsplit=1)
+        arg_crudo = resto[1].strip() if len(resto) > 1 else ""
+        arg_norm = _normalizar_comando(arg_crudo)
+
+        if arg_norm in ("", "ver", "listar"):
+            datos = await obtener_datos()
+            if not datos:
+                respuesta = "Lisa no tiene ningun dato permanente cargado. Usa: /dato <texto>"
+            else:
+                lineas = "\n".join(f"{n}. {t}" for n, t in datos)
+                respuesta = f"Lo que Lisa sabe siempre ({len(datos)}):\n\n{lineas}\n\nPara sacar uno: /dato borrar <numero>"
+        elif arg_norm.startswith("borrar"):
+            partes = arg_norm.split()
+            if len(partes) < 2 or not partes[1].isdigit():
+                respuesta = "Deci cual: /dato borrar <numero>. Mira los numeros con /dato ver."
+            elif await borrar_dato(int(partes[1])):
+                respuesta = f"Listo, borre el dato {partes[1]}."
+            else:
+                respuesta = f"No existe el dato {partes[1]}. Fijate los numeros con /dato ver."
+        else:
+            numero = await agregar_dato(arg_crudo)
+            total = len(await obtener_datos())
+            respuesta = (
+                f'Listo, Lisa lo va a tener en cuenta siempre (dato {numero}): "{arg_crudo}".\n\n'
+                f"Tiene {total} dato{'s' if total != 1 else ''} cargado{'s' if total != 1 else ''}. "
+                "Se borran con /dato borrar <numero>."
+            )
     elif nombre == "historial":
         # Diagnostico: "/historial 5493876403872 [cantidad]" muestra lo que Lisa
         # tiene guardado de ese telefono -- util para confirmar que un mensaje manual

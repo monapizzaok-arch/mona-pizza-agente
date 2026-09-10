@@ -127,6 +127,24 @@ class AvisoDelDia(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
+class DatoPermanente(Base):
+    """
+    Conocimiento que el local le carga a Lisa por WhatsApp (comando /dato) y que vale
+    hasta que lo borren: "el estacionamiento es por la calle de atras", "la promo 2x1
+    es solo los miercoles", "no hacemos envios a la zona sur".
+
+    Es el hermano permanente de AvisoDelDia. Se separan a proposito: mezclar lo de hoy
+    con lo de siempre termina en que nadie borra nada y el prompt se llena de cosas
+    vencidas. Un aviso se olvida solo; un dato hay que sacarlo a mano.
+    """
+
+    __tablename__ = "datos_permanentes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    texto: Mapped[str] = mapped_column(Text)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
 class EventoProcesado(Base):
     """
     Eventos de webhook que ya se atendieron.
@@ -355,6 +373,33 @@ async def borrar_avisos():
     async with async_session() as session:
         await session.execute(delete(AvisoDelDia))
         await session.commit()
+
+
+async def agregar_dato(texto: str) -> int:
+    """Guarda un dato permanente y devuelve su numero, con el que despues se borra."""
+    async with async_session() as session:
+        dato = DatoPermanente(texto=texto, creado_en=ahora())
+        session.add(dato)
+        await session.commit()
+        return dato.id
+
+
+async def obtener_datos() -> list[tuple[int, str]]:
+    """Los datos permanentes como (numero, texto), en el orden en que se cargaron."""
+    async with async_session() as session:
+        resultado = await session.execute(select(DatoPermanente).order_by(DatoPermanente.id))
+        return [(d.id, d.texto) for d in resultado.scalars().all()]
+
+
+async def borrar_dato(numero: int) -> bool:
+    """Borra un dato por su numero. False si ese numero no existe."""
+    async with async_session() as session:
+        dato = await session.get(DatoPermanente, numero)
+        if dato is None:
+            return False
+        await session.delete(dato)
+        await session.commit()
+        return True
 
 
 async def limpiar_avisos_viejos(dias: int = 3):
