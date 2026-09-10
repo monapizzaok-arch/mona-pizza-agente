@@ -209,7 +209,9 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
     return "output_config" in texto or "effort" in texto
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str = "") -> tuple[str, bool]:
+async def generar_respuesta(
+    mensaje: str, historial: list[dict], telefono: str = "", estado_negocio: dict | None = None
+) -> tuple[str, bool]:
     """
     Genera una respuesta con Claude. Si Claude decide registrar un pedido, ejecuta la
     herramienta y le devuelve el resultado antes de pedirle la respuesta final.
@@ -239,11 +241,15 @@ async def generar_respuesta(mensaje: str, historial: list[dict], telefono: str =
 
     # Estado del local, catalogo y avisos del dia, todo EN VIVO (mismo horario/stock/
     # precios que admin.html, mas lo que haya cargado el local por /aviso), no lo que
-    # diga el texto estatico del prompt de mas arriba. Las tres consultas son
-    # independientes asi que van en paralelo.
-    estado_negocio, menu, avisos = await asyncio.gather(
-        consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes()
-    )
+    # diga el texto estatico del prompt de mas arriba. Las consultas son independientes
+    # asi que van en paralelo. Si quien llama ya consulto el estado del local (main.py
+    # lo necesita antes, para decidir si contestar), lo pasa y no se vuelve a pedir.
+    if estado_negocio is None:
+        estado_negocio, menu, avisos = await asyncio.gather(
+            consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes()
+        )
+    else:
+        menu, avisos = await asyncio.gather(obtener_menu("monapizza"), obtener_avisos_vigentes())
 
     if estado_negocio.get("abierto") is not None:
         system_prompt += (

@@ -30,6 +30,8 @@ from agent.memory import (
     agregar_aviso,
     borrar_avisos,
     esta_pausado,
+    set_silencio_cerrado,
+    silencio_cerrado_activo,
     guardar_conversacion,
     guardar_mensaje,
     inicializar_db,
@@ -44,6 +46,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
+from agent.tools import consultar_estado_negocio
 
 load_dotenv()
 
@@ -355,7 +358,31 @@ async def procesar_comando_admin(msg: MensajeEntrante):
         await set_pausado(False)
         respuesta = "Lisa esta activa de nuevo."
     elif comando in ("estado", "status"):
-        respuesta = "Lisa esta PAUSADA ahora mismo." if await esta_pausado() else "Lisa esta ACTIVA ahora mismo."
+        pausada = await esta_pausado()
+        silencio = await silencio_cerrado_activo()
+        respuesta = (
+            ("Lisa esta PAUSADA ahora mismo (no contesta a nadie)." if pausada else "Lisa esta ACTIVA ahora mismo.")
+            + "\nFuera de horario: "
+            + ("NO contesta, deja el mensaje de ausencia de WhatsApp." if silencio else "contesta avisando que esta cerrado.")
+        )
+    elif comando.startswith("silencio"):
+        # Con el local cerrado: callarse (para que conteste el mensaje de ausencia de
+        # la app de WhatsApp Business) o contestar avisando que esta cerrado.
+        arg = _normalizar_comando(comando[len("silencio"):])
+        if arg in ("on", "si", "activar", "prender"):
+            await set_silencio_cerrado(True)
+            respuesta = (
+                "Listo: con el local cerrado Lisa no va a contestar nada.\n\n"
+                "Ojo: el mensaje de ausencia lo manda la app de WhatsApp Business del "
+                "celular, no Lisa. Si no lo tenes configurado ahi, el cliente no recibe "
+                "NADA fuera de horario. Volve atras con /silencio off."
+            )
+        elif arg in ("off", "no", "desactivar", "apagar"):
+            await set_silencio_cerrado(False)
+            respuesta = "Listo: con el local cerrado Lisa vuelve a contestar avisando que estan cerrados."
+        else:
+            actual = "ACTIVADO" if await silencio_cerrado_activo() else "DESACTIVADO"
+            respuesta = f"Silencio fuera de horario: {actual}. Usa /silencio on o /silencio off."
     elif comando.startswith("historial"):
         # Diagnostico: "/historial 5493876403872 [cantidad]" muestra lo que Lisa
         # tiene guardado de ese telefono -- util para confirmar que un mensaje manual
@@ -404,7 +431,7 @@ async def procesar_comando_admin(msg: MensajeEntrante):
     else:
         respuesta = (
             "No reconozco ese comando. Escribi /pausar, /reanudar, /estado, "
-            "/historial <telefono> o /aviso <texto>."
+            "/silencio on|off, /historial <telefono> o /aviso <texto>."
         )
 
     try:
@@ -424,10 +451,26 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
+            # El estado del local se consulta una sola vez y se le pasa a brain.py, que
+            # si no lo volveria a pedir por su cuenta para armar el prompt.
+            estado_negocio = await consultar_estado_negocio()
+
+            # Local cerrado + silencio activo: no se contesta nada, para que conteste el
+            # mensaje de ausencia de la app de WhatsApp Business. Igual se guarda lo que
+            # dijo el cliente, asi cuando abran Lisa retoma la conversacion con contexto.
+            # Si el estado no se pudo consultar (abierto is None) se contesta igual: es
+            # peor dejar a todos los clientes sin respuesta por una consulta que fallo.
+            if estado_negocio.get("abierto") is False and await silencio_cerrado_activo():
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                logger.info(f"Local cerrado y silencio activo: no se le responde a {msg.telefono}")
+                return
+
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)
-            respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial, telefono=msg.telefono)
+            respuesta, es_respuesta_real = await generar_respuesta(
+                msg.texto, historial, telefono=msg.telefono, estado_negocio=estado_negocio
+            )
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 

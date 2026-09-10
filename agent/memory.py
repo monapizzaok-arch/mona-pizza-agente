@@ -92,16 +92,22 @@ class ConversacionTelefono(Base):
 
 class EstadoAgente(Base):
     """
-    Un unico renglon (id=1) con el estado operativo del agente. Hoy solo guarda si
-    esta pausado; lo prende/apaga el comando que manda ADMIN_WHATSAPP_NUMBER (ver
-    main.py). Va en la base, no en una variable en memoria, para que sobreviva a un
-    reinicio o redespliegue del servidor.
+    Un unico renglon (id=1) con el estado operativo del agente, que prende y apaga el
+    ADMIN_WHATSAPP_NUMBER por comando (ver main.py). Va en la base, no en una variable
+    en memoria, para que sobreviva a un reinicio o redespliegue del servidor.
+
+      pausado          Lisa no contesta nada, en ningun horario (comando /pausar).
+      silencio_cerrado Con el local CERRADO, Lisa no contesta (comando /silencio).
+                       Sirve para dejar que conteste el mensaje de ausencia de la app
+                       de WhatsApp Business en vez de ella. Apagado = contesta igual,
+                       avisando que esta cerrado y a que hora abren.
     """
 
     __tablename__ = "estado_agente"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     pausado: Mapped[bool] = mapped_column(default=False)
+    silencio_cerrado: Mapped[bool] = mapped_column(default=False)
     actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
@@ -136,9 +142,35 @@ class EventoProcesado(Base):
 
 
 async def inicializar_db():
-    """Crea las tablas si no existen."""
+    """Crea las tablas si no existen y aplica las migraciones de columnas."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _migrar_columnas()
+
+
+async def _migrar_columnas():
+    """
+    Agrega columnas nuevas a tablas que YA existian.
+
+    create_all() crea las tablas que faltan, pero no toca las que ya estan: una
+    columna agregada despues (como silencio_cerrado) nunca apareceria en produccion,
+    y el agente reventaria al leerla. Como el proyecto no usa Alembic, se hace a mano
+    y de forma idempotente.
+    """
+    if DATABASE_URL.startswith("sqlite"):
+        # SQLite no soporta "IF NOT EXISTS" en ADD COLUMN: si ya esta, tira error y se ignora.
+        sentencias = [("estado_agente", "ALTER TABLE estado_agente ADD COLUMN silencio_cerrado BOOLEAN DEFAULT 0")]
+    else:
+        sentencias = [
+            ("estado_agente", "ALTER TABLE estado_agente ADD COLUMN IF NOT EXISTS silencio_cerrado BOOLEAN DEFAULT FALSE")
+        ]
+
+    for tabla, sql in sentencias:
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(sql)
+        except Exception as e:  # noqa: BLE001 — casi siempre "la columna ya existe"
+            logger.debug(f"Migracion sobre {tabla} no aplicada (probablemente ya estaba): {e}")
 
 
 async def marcar_evento_procesado(evento_id: str) -> bool:
@@ -269,6 +301,25 @@ async def set_pausado(valor: bool):
             fila.actualizado_en = ahora()
         else:
             session.add(EstadoAgente(id=1, pausado=valor, actualizado_en=ahora()))
+        await session.commit()
+
+
+async def silencio_cerrado_activo() -> bool:
+    """True si, con el local cerrado, Lisa tiene que quedarse callada."""
+    async with async_session() as session:
+        fila = await session.get(EstadoAgente, 1)
+        return bool(fila.silencio_cerrado) if fila else False
+
+
+async def set_silencio_cerrado(valor: bool):
+    """Prende o apaga el silencio fuera de horario (comando /silencio)."""
+    async with async_session() as session:
+        fila = await session.get(EstadoAgente, 1)
+        if fila:
+            fila.silencio_cerrado = valor
+            fila.actualizado_en = ahora()
+        else:
+            session.add(EstadoAgente(id=1, silencio_cerrado=valor, actualizado_en=ahora()))
         await session.commit()
 
 
