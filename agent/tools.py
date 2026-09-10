@@ -296,16 +296,34 @@ async def registrar_pedido(
         precio_unit = float(precios[vidx])
         etiquetas = prod.get("_etiquetas", [])
         variante_txt = etiquetas[vidx] if vidx < len(etiquetas) else ""
-        # Detalle = SOLO la variante, tal cual la cargaria la web (ej. "Media"). Nada de
-        # texto agregado por Lisa: una mitad y mitad no es nada fuera de lo comun, cada
-        # mitad se carga como cualquier otro producto. Si el cliente pide algo realmente
-        # inusual, esa aclaracion va aparte, en el campo "nota" del pedido completo.
-        detalle = variante_txt or None
+
+        # El item se arma con el MISMO formato que la web (ver pedir__index.html): el
+        # texto compuesto en "detalle" ("Unidad · x2") y ademas "variante" y "extras"
+        # como campos estructurados. Hay que mandar los dos porque cada pantalla usa
+        # uno distinto:
+        #
+        #   comandas-cocina.html  usa variante/extras/cantidad, y SOLO cae al texto
+        #                         plano si no viene ninguno de los tres. Mandando
+        #                         cantidad sin variante, la variante no se ve.
+        #   ticket.py (impresora) usa SOLO "detalle", y nunca imprime cantidad. Sin
+        #                         el "xN" en el texto, la cantidad no sale en el papel.
+        #
+        # Mandar uno solo de los dos formatos deja al cocinero sin saber si son 2
+        # unidades o 2 docenas. No es cosmetico.
+        partes_detalle = [p for p in (variante_txt,) if p]
+        if cantidad > 1:
+            partes_detalle.append(f"x{cantidad}")
+        # Vacio y no None: es lo que guarda la web cuando no hay nada que aclarar.
+        detalle = " · ".join(partes_detalle)
 
         lineas.append(
             {
                 "nombre": prod.get("nombre", ""),
                 "detalle": detalle,
+                "variante": variante_txt or None,
+                # Lisa todavia no ofrece adicionales; va vacio como lo manda la web
+                # cuando el cliente no eligio ninguno.
+                "extras": [],
                 "cantidad": cantidad,
                 "precio": round(precio_unit * cantidad, 2),
                 "producto_id": pid,
