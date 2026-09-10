@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from agent.brain import generar_respuesta, obtener_mensaje_error
+from agent.brain import MODELO, generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     agregar_aviso,
     borrar_avisos,
@@ -151,6 +151,9 @@ async def health_check():
         "admin_configurado": bool(ADMIN_WHATSAPP_NUMBER),
         "admin_termina_en": ADMIN_WHATSAPP_NUMBER[-4:] if ADMIN_WHATSAPP_NUMBER else None,
         "db_motor": DB_MOTOR,
+        # Que modelo esta contestando de verdad, para confirmar un cambio de
+        # ANTHROPIC_MODEL sin tener que deducirlo de como responde Lisa.
+        "modelo": MODELO,
     }
 
 
