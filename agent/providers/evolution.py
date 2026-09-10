@@ -135,9 +135,19 @@ class ProveedorEvolution(ProveedorWhatsApp):
             logger.debug(f"Mensaje de grupo ignorado: {remote_jid}")
             return None
 
-        # remoteJid viene como "5493876403872@s.whatsapp.net". El telefono es lo de
-        # antes del "@"; el sufijo ":12" que a veces agrega Baileys se descarta.
-        telefono = remote_jid.split("@", 1)[0].split(":", 1)[0].lstrip("+")
+        # WhatsApp esta migrando al direccionamiento "LID": el remoteJid deja de ser el
+        # telefono y pasa a ser un id opaco ("145861417930892@lid"), con el numero real
+        # en remoteJidAlt. Si se toma el LID como telefono, TODO se rompe en silencio:
+        # la respuesta se manda a un numero que no existe, el chequeo del numero admin
+        # no matchea nunca, y la memoria queda guardada bajo un id que no vuelve a
+        # aparecer. Por eso remoteJidAlt tiene prioridad cuando viene.
+        jid_telefono = str(clave.get("remoteJidAlt") or "") or remote_jid
+        if jid_telefono.endswith("@lid"):
+            logger.warning(
+                f"Mensaje con direccionamiento LID y sin remoteJidAlt ({jid_telefono}): "
+                "no hay telefono real, el agente no va a poder responderle."
+            )
+        telefono = jid_telefono.split("@", 1)[0].split(":", 1)[0].lstrip("+")
 
         texto = self._extraer_texto(dato.get("message") or {})
         if not texto:
