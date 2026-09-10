@@ -60,6 +60,10 @@ class ProveedorEvolution(ProveedorWhatsApp):
         # plano de v2, False si hubo que caer al anidado de v1.
         self._formato_v2 = True
 
+        # Token propio de la instancia (el que Evolution manda en los webhooks). Se
+        # consulta a demanda la primera vez que hace falta. Ver _token_instancia().
+        self._token_cache: str | None = None
+
         if not self.base_url:
             logger.warning("EVOLUTION_API_URL no esta configurada: el agente no va a poder responder")
         if not self.api_key:
@@ -76,8 +80,13 @@ class ProveedorEvolution(ProveedorWhatsApp):
         Lo unico verificable es el campo "apikey" que el propio payload incluye. No es
         una firma criptografica (no prueba que el cuerpo no fue modificado), pero si
         evita que cualquiera que adivine la URL publica pueda inyectar mensajes falsos
-        —y con eso, pedidos falsos en LocalDB—. Si el payload no trae el campo, se deja
-        pasar con una advertencia: no todas las versiones lo mandan.
+        —y con eso, pedidos falsos en LocalDB—.
+
+        OJO con cual apikey manda: NO es la global (AUTHENTICATION_API_KEY), es el
+        token propio de la instancia, que es otro string. Aceptar solo la global hace
+        que se rechacen TODOS los mensajes con un 401, que es exactamente lo que paso
+        la primera vez que se conecto esto. Por eso valen las dos, y el token de la
+        instancia se consulta solo (se cachea) en vez de pedir otra variable de entorno.
         """
         if not self.api_key:
             return True  # sin clave configurada no hay nada contra que comparar
@@ -95,10 +104,57 @@ class ProveedorEvolution(ProveedorWhatsApp):
             )
             return True
 
-        if recibida != self.api_key:
-            logger.warning("Webhook de Evolution con apikey que no coincide: rechazado")
-            return False
-        return True
+        if recibida == self.api_key:
+            return True
+
+        token_instancia = await self._token_instancia()
+        if token_instancia is None:
+            # No se pudo averiguar contra que comparar. Se deja pasar avisando: para un
+            # negocio es peor tragarse todos los mensajes de los clientes en silencio
+            # que aceptar uno falso en un chequeo que, de movida, es best-effort.
+            logger.warning(
+                "No se pudo obtener el token de la instancia para verificar el webhook: "
+                "se deja pasar sin verificar."
+            )
+            return True
+
+        if recibida == token_instancia:
+            return True
+
+        logger.warning(
+            f"Webhook de Evolution con apikey desconocida (empieza con "
+            f"'{str(recibida)[:6]}...'): rechazado"
+        )
+        return False
+
+    async def _token_instancia(self) -> str | None:
+        """
+        Token propio de la instancia, que es el que Evolution manda en los webhooks.
+
+        Se consulta una sola vez y queda cacheado. Devuelve None si no se pudo obtener.
+        """
+        if self._token_cache is not None:
+            return self._token_cache
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cliente:
+                r = await cliente.get(
+                    f"{self.base_url}/instance/fetchInstances",
+                    headers={"apikey": self.api_key},
+                )
+            instancias = r.json()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(f"No se pudo consultar el token de la instancia: {e}")
+            return None
+
+        for inst in instancias if isinstance(instancias, list) else [instancias]:
+            i = inst.get("instance", inst) if isinstance(inst, dict) else {}
+            if (i.get("name") or i.get("instanceName")) == self.instance:
+                token = i.get("token") or i.get("hash") or i.get("apikey")
+                if token:
+                    self._token_cache = str(token)
+                    return self._token_cache
+        return None
 
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """Normaliza el evento messages.upsert de Evolution API."""
