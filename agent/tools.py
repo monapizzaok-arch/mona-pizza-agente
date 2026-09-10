@@ -153,6 +153,49 @@ async def obtener_menu(negocio: str = "monapizza") -> dict | None:
         return None
 
 
+DIAS_SEMANA = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"]
+
+
+async def obtener_horarios_semanales() -> str | None:
+    """
+    El horario de atencion de toda la semana, como lo tiene cargado admin.html.
+
+    Es lo unico del horario que estadoApertura NO contesta: ese dice si esta abierto
+    AHORA y cuando vuelve a abrir, pero no que dias abre. Sin esto, "¿abren los lunes?"
+    solo se puede contestar con el texto fijo del prompt, que queda viejo apenas alguien
+    toca el horario en admin.
+
+    Devuelve el texto ya armado para el prompt, o None si no se pudo consultar (por
+    ejemplo si el endpoint todavia no esta subido al hosting): en ese caso el agente
+    sigue con el texto estatico, que es lo que hacia antes.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as cliente:
+            r = await cliente.get(LOCALDB_API_URL, params={"accion": "horariosPublicos"})
+        filas = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"No se pudo consultar el horario semanal: {e}")
+        return None
+
+    # Si el endpoint no esta desplegado todavia, api.php contesta
+    # {"ok": false, "error": "Acción desconocida: ..."} en vez de una lista.
+    if not isinstance(filas, list) or not filas:
+        logger.warning(f"horariosPublicos no devolvio una lista (¿falta subir api.php?): {str(filas)[:120]}")
+        return None
+
+    lineas = []
+    for f in filas:
+        try:
+            dia = DIAS_SEMANA[int(f.get("dia_semana", -1))]
+        except (ValueError, TypeError, IndexError):
+            continue
+        if f.get("abierto"):
+            lineas.append(f"{dia}: {f.get('hora_apertura')} a {f.get('hora_cierre')}")
+        else:
+            lineas.append(f"{dia}: cerrado")
+    return "\n".join(lineas) if lineas else None
+
+
 def _fmt_precio(valor) -> str:
     try:
         return f"{float(valor):,.0f}".replace(",", ".")

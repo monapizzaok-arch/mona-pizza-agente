@@ -17,7 +17,13 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from agent.memory import obtener_avisos_vigentes, obtener_datos
-from agent.tools import consultar_estado_negocio, formatear_catalogo, obtener_menu, registrar_pedido
+from agent.tools import (
+    consultar_estado_negocio,
+    formatear_catalogo,
+    obtener_horarios_semanales,
+    obtener_menu,
+    registrar_pedido,
+)
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -273,12 +279,27 @@ async def generar_respuesta(
     # asi que van en paralelo. Si quien llama ya consulto el estado del local (main.py
     # lo necesita antes, para decidir si contestar), lo pasa y no se vuelve a pedir.
     if estado_negocio is None:
-        estado_negocio, menu, avisos, datos = await asyncio.gather(
-            consultar_estado_negocio(), obtener_menu("monapizza"), obtener_avisos_vigentes(), obtener_datos()
+        estado_negocio, menu, avisos, datos, horarios = await asyncio.gather(
+            consultar_estado_negocio(),
+            obtener_menu("monapizza"),
+            obtener_avisos_vigentes(),
+            obtener_datos(),
+            obtener_horarios_semanales(),
         )
     else:
-        menu, avisos, datos = await asyncio.gather(
-            obtener_menu("monapizza"), obtener_avisos_vigentes(), obtener_datos()
+        menu, avisos, datos, horarios = await asyncio.gather(
+            obtener_menu("monapizza"),
+            obtener_avisos_vigentes(),
+            obtener_datos(),
+            obtener_horarios_semanales(),
+        )
+
+    if horarios:
+        system_prompt += (
+            "\n\n## Horario de atención de la semana (en vivo, lo que está cargado en el sistema)\n"
+            f"{horarios}\n"
+            "Usá ESTO para cualquier pregunta sobre qué días o a qué hora abren, y no el "
+            "horario escrito más arriba: este sale del sistema y está siempre al día."
         )
 
     if datos:
