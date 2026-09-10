@@ -338,8 +338,103 @@ async def guardar_mensaje_humano(msg: MensajeEntrante):
 
 def _normalizar_comando(texto: str) -> str:
     """minusculas, sin tildes y sin puntuacion final, para que 'Pausar', 'PAUSA?' o 'pausá.' matcheen igual."""
-    t = texto.strip().lower().rstrip("?!.¿¡ ")
+    t = texto.strip().lower()
+    # Sacar la puntuacion final, salvo que el comando SEA la puntuacion: "/?" es un
+    # alias valido de /help, y recortarlo lo dejaria en string vacio.
+    recortado = t.rstrip("?!.¿¡ ")
+    if recortado:
+        t = recortado
     return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+
+
+# ════════════════════════════════════════════════════════════
+# Catalogo de comandos del admin — UNICA fuente de verdad
+# ════════════════════════════════════════════════════════════
+#
+# De aca salen las dos cosas: como se reconoce cada comando (los alias) y el texto que
+# muestra /help. Estan juntos a proposito: si la ayuda fuera una lista escrita a mano
+# aparte, se desactualizaria la primera vez que agreguemos un comando y nadie se
+# acuerde de tocarla.
+#
+# Para agregar uno nuevo: una entrada aca + su rama en procesar_comando_admin().
+#
+#   alias            como puede escribirlo el usuario (ya normalizado: sin tildes, en minuscula)
+#   con_argumentos   True si lleva texto atras (matchea por prefijo en vez de exacto)
+#   uso              como se muestra en /help
+#   que_hace         explicacion en una linea
+COMANDOS = [
+    {
+        "nombre": "help",
+        "alias": ("help", "ayuda", "comandos", "?"),
+        "con_argumentos": False,
+        "uso": "/help",
+        "que_hace": "Esta lista.",
+    },
+    {
+        "nombre": "estado",
+        "alias": ("estado", "status"),
+        "con_argumentos": False,
+        "uso": "/estado",
+        "que_hace": "Como esta Lisa ahora: si esta pausada y si se calla fuera de horario.",
+    },
+    {
+        "nombre": "pausar",
+        "alias": ("pausar", "pausa", "pause"),
+        "con_argumentos": False,
+        "uso": "/pausar",
+        "que_hace": "Apaga a Lisa: no le contesta a nadie, a ninguna hora, hasta que la reactives.",
+    },
+    {
+        "nombre": "reanudar",
+        "alias": ("reanudar", "activar", "resume", "reactivar"),
+        "con_argumentos": False,
+        "uso": "/reanudar",
+        "que_hace": "Vuelve a prender a Lisa despues de un /pausar.",
+    },
+    {
+        "nombre": "silencio",
+        "alias": ("silencio",),
+        "con_argumentos": True,
+        "uso": "/silencio on|off",
+        "que_hace": "Con el local CERRADO: on = no contesta nada (deja el mensaje de ausencia de WhatsApp), off = avisa que estan cerrados.",
+    },
+    {
+        "nombre": "aviso",
+        "alias": ("aviso",),
+        "con_argumentos": True,
+        "uso": "/aviso <texto>  ·  /aviso ver  ·  /aviso borrar",
+        "que_hace": "Algo que Lisa tiene que tener en cuenta SOLO HOY (ej: 'nos quedamos sin rucula'). Se olvida solo manana.",
+    },
+    {
+        "nombre": "historial",
+        "alias": ("historial",),
+        "con_argumentos": True,
+        "uso": "/historial <telefono> [cantidad]",
+        "que_hace": "Muestra lo que Lisa tiene guardado de esa conversacion. Sirve para revisar que le dijo a un cliente.",
+    },
+]
+
+
+def _resolver_comando(comando: str) -> str | None:
+    """Del texto normalizado al nombre canonico del comando. None si no se reconoce."""
+    for c in COMANDOS:
+        if c["con_argumentos"]:
+            if any(comando == a or comando.startswith(a + " ") for a in c["alias"]):
+                return c["nombre"]
+        elif comando in c["alias"]:
+            return c["nombre"]
+    return None
+
+
+def _texto_ayuda() -> str:
+    """Arma el texto de /help a partir del catalogo, para que no se desactualice."""
+    lineas = ["Comandos disponibles:", ""]
+    for c in COMANDOS:
+        lineas.append(f"{c['uso']}")
+        lineas.append(f"   {c['que_hace']}")
+        lineas.append("")
+    lineas.append("Se escriben con / o \\ adelante. Sin el prefijo, este numero le habla a Lisa como un cliente mas.")
+    return "\n".join(lineas)
 
 
 async def procesar_comando_admin(msg: MensajeEntrante):
@@ -351,13 +446,17 @@ async def procesar_comando_admin(msg: MensajeEntrante):
     texto_comando = msg.texto.strip().lstrip("\\/").strip()
     comando = _normalizar_comando(texto_comando)
 
-    if comando in ("pausar", "pausa", "pause"):
+    nombre = _resolver_comando(comando)
+
+    if nombre == "help":
+        respuesta = _texto_ayuda()
+    elif nombre == "pausar":
         await set_pausado(True)
         respuesta = "Lisa quedo pausada: no va a responder a los clientes hasta que la reactives con '/reanudar'."
-    elif comando in ("reanudar", "activar", "resume", "reactivar"):
+    elif nombre == "reanudar":
         await set_pausado(False)
         respuesta = "Lisa esta activa de nuevo."
-    elif comando in ("estado", "status"):
+    elif nombre == "estado":
         pausada = await esta_pausado()
         silencio = await silencio_cerrado_activo()
         respuesta = (
@@ -365,7 +464,7 @@ async def procesar_comando_admin(msg: MensajeEntrante):
             + "\nFuera de horario: "
             + ("NO contesta, deja el mensaje de ausencia de WhatsApp." if silencio else "contesta avisando que esta cerrado.")
         )
-    elif comando.startswith("silencio"):
+    elif nombre == "silencio":
         # Con el local cerrado: callarse (para que conteste el mensaje de ausencia de
         # la app de WhatsApp Business) o contestar avisando que esta cerrado.
         arg = _normalizar_comando(comando[len("silencio"):])
@@ -383,7 +482,7 @@ async def procesar_comando_admin(msg: MensajeEntrante):
         else:
             actual = "ACTIVADO" if await silencio_cerrado_activo() else "DESACTIVADO"
             respuesta = f"Silencio fuera de horario: {actual}. Usa /silencio on o /silencio off."
-    elif comando.startswith("historial"):
+    elif nombre == "historial":
         # Diagnostico: "/historial 5493876403872 [cantidad]" muestra lo que Lisa
         # tiene guardado de ese telefono -- util para confirmar que un mensaje manual
         # quedo bien guardado, sin tener que mirar la base de datos directamente.
@@ -407,7 +506,7 @@ async def procesar_comando_admin(msg: MensajeEntrante):
                 recorte = 300 if cantidad <= 10 else 120
                 lineas = [f"{'Cliente' if h['role'] == 'user' else 'Lisa'}: {h['content'][:recorte]}" for h in historial]
                 respuesta = f"Ultimos {len(historial)} mensajes de {telefono_consulta}:\n\n" + "\n\n".join(lineas)
-    elif comando.startswith("aviso"):
+    elif nombre == "aviso":
         # "/aviso <texto>" carga algo que Lisa tiene que tener en cuenta SOLO hoy (se
         # inyecta en su prompt en cada mensaje, ver brain.py) sin tocar prompts.yaml ni
         # hacer un deploy: "nos quedamos sin rucula", "ofrece primero la promo x3".
@@ -429,10 +528,8 @@ async def procesar_comando_admin(msg: MensajeEntrante):
             await agregar_aviso(resto)
             respuesta = f'Listo, Lisa ya sabe: "{resto}". Vale solo por hoy.'
     else:
-        respuesta = (
-            "No reconozco ese comando. Escribi /pausar, /reanudar, /estado, "
-            "/silencio on|off, /historial <telefono> o /aviso <texto>."
-        )
+        # Sin lista escrita a mano: se manda a /help, que sale del catalogo.
+        respuesta = f'No reconozco "{texto_comando[:40]}". Escribi /help para ver los comandos.'
 
     try:
         await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
