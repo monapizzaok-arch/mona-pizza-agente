@@ -250,7 +250,11 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
     while mensajes and mensajes[0].role != "user":
         mensajes.pop(0)
 
-    return [{"role": m.role, "content": m.content} for m in mensajes]
+    # El timestamp viaja aparte de role/content: brain.py arma los mensajes para la API
+    # proyectando solo esos dos campos, asi que agregarlo no rompe nada, y le permite
+    # saber de cuando es la conversacion. Sin esto, un mensaje de hace tres dias le
+    # llega al modelo indistinguible de uno de hace treinta segundos.
+    return [{"role": m.role, "content": m.content, "timestamp": m.timestamp} for m in mensajes]
 
 
 async def limpiar_historial(telefono: str):

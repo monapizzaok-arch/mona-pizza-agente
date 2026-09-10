@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 
 import yaml
 from anthropic import AsyncAnthropic
@@ -161,6 +162,33 @@ def obtener_mensaje_fallback() -> str:
     )
 
 
+def _antiguedad_historial(historial: list[dict]) -> str | None:
+    """
+    Hace cuanto fue el ultimo mensaje del historial, en texto ("2 dias", "5 horas").
+
+    None si el historial esta vacio o es reciente: si la conversacion viene corrida no
+    hace falta aclarar nada, y aclararlo de mas solo gasta tokens y confunde.
+    """
+    if not historial:
+        return None
+    ultimo = historial[-1].get("timestamp")
+    if ultimo is None:
+        return None
+
+    # SQLite puede devolver el timestamp sin zona horaria; se asume UTC, que es como se
+    # guarda (ver ahora() en memory.py).
+    if ultimo.tzinfo is None:
+        ultimo = ultimo.replace(tzinfo=timezone.utc)
+
+    minutos = (datetime.now(timezone.utc) - ultimo).total_seconds() / 60
+    if minutos < 180:  # menos de 3 horas: es la misma charla, no hay nada que aclarar
+        return None
+    if minutos < 1440:
+        return f"{int(minutos // 60)} horas"
+    dias = int(minutos // 1440)
+    return "1 día" if dias == 1 else f"{dias} días"
+
+
 def _extraer_texto(respuesta) -> str:
     """
     Junta el texto de la respuesta de Claude.
@@ -283,6 +311,22 @@ async def generar_respuesta(
             "la posición de la variante elegida (variante_index: 0 = la primera de la lista "
             "para ese producto, 1 = la segunda, etc.). Un producto marcado SIN STOCK no se "
             "ofrece ni se agrega a ningún pedido — decile al cliente que por ahora no hay."
+        )
+
+    # Si la conversacion venia de antes, decirlo: el historial no trae ninguna marca de
+    # tiempo, asi que un mensaje de hace tres dias le llega al modelo igual que uno de
+    # hace treinta segundos. Eso hacia que un "hacen envios?" se leyera como la
+    # continuacion de una charla en curso, arrastrando el pedido y el estado de aquel
+    # momento.
+    antiguedad = _antiguedad_historial(historial)
+    if antiguedad:
+        system_prompt += (
+            "\n\n## OJO: esta conversación viene de antes\n"
+            f"Los mensajes anteriores son de hace {antiguedad}. NO es una charla en curso: "
+            "el cliente volvió a escribir recién ahora.\n"
+            "Todo lo que aparezca ahí —un pedido a medio armar, precios, si estaban abiertos, "
+            "qué había en stock— es de aquel momento y puede no valer más. No lo des por "
+            "vigente: confirmá contra los datos de este prompt, que son los de ahora."
         )
 
     # El estado del local va ULTIMO, pegado a la conversacion, y no antes del catalogo:
