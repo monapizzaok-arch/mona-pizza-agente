@@ -9,7 +9,7 @@ import os
 
 from agent.providers.base import MensajeEntrante, ProveedorWhatsApp
 
-PROVEEDORES_SOPORTADOS = ("zernio", "meta")
+PROVEEDORES_SOPORTADOS = ("zernio", "meta", "evolution")
 
 
 def obtener_proveedor() -> ProveedorWhatsApp:
@@ -37,6 +37,11 @@ def obtener_proveedor() -> ProveedorWhatsApp:
         from agent.providers.meta import ProveedorMeta
 
         return ProveedorMeta()
+
+    if proveedor == "evolution":
+        from agent.providers.evolution import ProveedorEvolution
+
+        return ProveedorEvolution()
 
     raise ValueError(
         f"Proveedor no soportado: '{proveedor}'. "
