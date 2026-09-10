@@ -11,8 +11,9 @@ import logging
 import os
 import sys
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 # Los mensajes de WhatsApp pueden traer emojis, y quedan en los logs. La consola de
 # Windows por default usa cp1252, que no los sabe imprimir y tira UnicodeEncodeError.
@@ -70,6 +71,13 @@ PORT = int(os.getenv("PORT", "8000"))
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
 # en paralelo, los dos leerian el mismo historial y las escrituras quedarian intercaladas.
 _candados: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+# Ultimos webhooks recibidos, para diagnosticar desde afuera (GET /diagnostico) sin
+# tener que leer los logs del servidor. Nace de una pregunta que costo horas contestar
+# mas de una vez: "¿el proveedor esta llamando al webhook, o ni siquiera llega?". Solo
+# guarda METADATOS -- nunca el texto del mensaje ni el telefono completo, porque el
+# endpoint es publico.
+_ULTIMOS_WEBHOOKS: deque = deque(maxlen=15)
 
 # Si la configuracion esta mal, guardamos el error y lo mostramos en el health check,
 # en vez de reventar en el import y dejar a Railway reiniciando el contenedor a ciegas.
@@ -161,6 +169,48 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+def _anotar_webhook(evento: str, parseados: int | None = None, mensajes=None, error: str | None = None):
+    """
+    Registra METADATOS del webhook recibido para GET /diagnostico.
+
+    Nunca el texto del mensaje ni el telefono completo: el endpoint es publico, y lo
+    que se necesita para diagnosticar es si el proveedor llama y si el parseo entiende
+    lo que llega -- no que dijo el cliente.
+    """
+    entrada = {
+        "cuando": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "evento": evento,
+    }
+    if error:
+        entrada["error"] = error
+    if parseados is not None:
+        entrada["mensajes_parseados"] = parseados
+    for msg in (mensajes or [])[:3]:
+        entrada.setdefault("detalle", []).append(
+            {
+                "telefono_termina_en": (msg.telefono or "")[-4:] or "(vacio)",
+                "es_propio": msg.es_propio,
+                "enviado_por_humano": msg.enviado_por_humano,
+                "tiene_texto": bool(msg.texto.strip()),
+            }
+        )
+    _ULTIMOS_WEBHOOKS.append(entrada)
+
+
+@app.get("/diagnostico")
+async def diagnostico():
+    """
+    Ultimos webhooks recibidos, para saber desde afuera si el proveedor esta llamando
+    y si el parseo los entiende. Solo metadatos (ver _anotar_webhook).
+    """
+    return {
+        "proveedor": proveedor.__class__.__name__ if proveedor else None,
+        "commit": COMMIT,
+        "webhooks_recibidos": len(_ULTIMOS_WEBHOOKS),
+        "ultimos": list(_ULTIMOS_WEBHOOKS),
+    }
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request, tareas: BackgroundTasks):
     """
@@ -175,17 +225,31 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     trabajar despues.
     """
     if proveedor is None:
+        _anotar_webhook(evento="(sin proveedor configurado)")
         raise HTTPException(status_code=503, detail=error_configuracion or "Proveedor no configurado")
 
     if not await proveedor.verificar_firma(request):
+        _anotar_webhook(evento="(firma rechazada)")
         raise HTTPException(status_code=401, detail="Firma del webhook invalida")
+
+    try:
+        crudo = await request.json()
+    except Exception:  # noqa: BLE001
+        crudo = {}
 
     try:
         mensajes = await proveedor.parsear_webhook(request)
     except Exception as e:  # noqa: BLE001
         # Un payload raro no debe hacer que el proveedor reintente para siempre
         logger.error(f"No se pudo leer el webhook: {e}")
+        _anotar_webhook(evento=str(crudo.get("event") if isinstance(crudo, dict) else "?"), error=str(e)[:120])
         return {"status": "ignorado"}
+
+    _anotar_webhook(
+        evento=str(crudo.get("event") if isinstance(crudo, dict) else "?"),
+        parseados=len(mensajes),
+        mensajes=mensajes,
+    )
 
     encolados = 0
     for msg in mensajes:
