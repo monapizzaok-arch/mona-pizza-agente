@@ -251,17 +251,6 @@ async def generar_respuesta(
     else:
         menu, avisos = await asyncio.gather(obtener_menu("monapizza"), obtener_avisos_vigentes())
 
-    if estado_negocio.get("abierto") is not None:
-        system_prompt += (
-            "\n\n## Estado del local ahora mismo (en vivo — tiene prioridad sobre el horario de arriba)\n"
-            f"{'ABIERTO' if estado_negocio['abierto'] else 'CERRADO'}. {estado_negocio['mensaje']}\n"
-            f"Retiro disponible: {'si' if estado_negocio['retiro'] else 'no'}. "
-            f"Delivery disponible: {'si' if estado_negocio['delivery'] else 'no'}.\n"
-            "Si esta CERRADO: segui respondiendo preguntas del menu con normalidad, pero NO tomes "
-            "ni registres ningun pedido. Explicale al cliente que ahora mismo no podemos tomar "
-            "pedidos y cuando volvemos a abrir, usando el mensaje de arriba."
-        )
-
     if avisos:
         system_prompt += (
             "\n\n## Avisos de hoy (cargados por el local, valen SOLO por hoy — tienen "
@@ -295,6 +284,33 @@ async def generar_respuesta(
             "para ese producto, 1 = la segunda, etc.). Un producto marcado SIN STOCK no se "
             "ofrece ni se agrega a ningún pedido — decile al cliente que por ahora no hay."
         )
+
+    # El estado del local va ULTIMO, pegado a la conversacion, y no antes del catalogo:
+    # es el dato que mas se contradice con el historial (que puede tener mensajes de
+    # hace horas, de cuando el local SI estaba abierto) y el que peor sale si el modelo
+    # lo pasa por alto. Con un modelo chico (Haiku), ponerlo lejos del final hacia que
+    # la primera respuesta omitiera que estaban cerrados y siguiera la inercia del
+    # historial, hasta que el cliente lo corregia.
+    if estado_negocio.get("abierto") is not None:
+        abierto = estado_negocio["abierto"]
+        system_prompt += (
+            "\n\n## ESTADO DEL LOCAL AHORA MISMO — dato en vivo, es la verdad\n"
+            f"{'ABIERTO' if abierto else 'CERRADO'}. {estado_negocio['mensaje']}\n"
+            f"Retiro disponible: {'si' if estado_negocio['retiro'] else 'no'}. "
+            f"Delivery disponible: {'si' if estado_negocio['delivery'] else 'no'}.\n"
+            "Este bloque le gana a TODO lo de arriba y también al historial de la "
+            "conversación: los mensajes anteriores pueden ser de hace horas, de cuando el "
+            "local estaba abierto, y no dicen nada de cómo está ahora.\n"
+        )
+        if not abierto:
+            system_prompt += (
+                "Como está CERRADO: decilo vos en tu PRIMERA respuesta, aunque el cliente "
+                "no haya preguntado por el horario y aunque venga hablando de un pedido. "
+                "No tomes ni registres ningún pedido. Podés seguir respondiendo dudas del "
+                "menú con normalidad y dejar todo listo para cuando abran.\n"
+                "NUNCA digas que están abiertos, ni que la web se equivoca o 'tarda en "
+                "actualizarse': la web y vos leen exactamente el mismo dato, este."
+            )
 
     extras = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
 
