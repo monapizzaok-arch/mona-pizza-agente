@@ -26,6 +26,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from agent.brain import MODELO, generar_respuesta, obtener_mensaje_error
+from agent.envio import MAX_ENVIOS_CONCURRENTES, enviar
+from agent.envio import estadisticas as estadisticas_envio
 from agent.memory import (
     agregar_aviso,
     agregar_dato,
@@ -217,6 +219,10 @@ async def diagnostico():
         "commit": COMMIT,
         "webhooks_recibidos": len(_ULTIMOS_WEBHOOKS),
         "ultimos": list(_ULTIMOS_WEBHOOKS),
+        # Salida: cuantos mensajes se mandaron desde que arranco el proceso, cuantos
+        # necesitaron reintento y cuantos se perdieron igual. "esperando_lugar" en 0
+        # significa que el tope de envios simultaneos nunca llego a activarse.
+        "envios": {**estadisticas_envio, "max_concurrentes": MAX_ENVIOS_CONCURRENTES},
     }
 
 
@@ -581,10 +587,8 @@ async def procesar_comando_admin(msg: MensajeEntrante):
         # Sin lista escrita a mano: se manda a /help, que sale del catalogo.
         respuesta = f'No reconozco "{texto_comando[:40]}". Escribi /help para ver los comandos.'
 
-    try:
-        await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"No se pudo responder el comando del admin: {e}")
+    if not await enviar(proveedor, msg.telefono, respuesta, msg.contexto):
+        logger.error(f"No se pudo responder el comando del admin: {texto_comando[:40]}")
 
 
 async def procesar_mensaje(msg: MensajeEntrante):
@@ -619,12 +623,14 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 msg.texto, historial, telefono=msg.telefono, estado_negocio=estado_negocio
             )
 
-            enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+            # enviar() ya reintenta solo con esperas crecientes (ver agent/envio.py):
+            # si llega aca en False es porque fallaron todos los intentos.
+            enviado = await enviar(proveedor, msg.telefono, respuesta, msg.contexto)
 
             if not enviado:
                 # El evento se marco como procesado ANTES de llegar hasta aca, para que dos
                 # entregas simultaneas no se dupliquen. Si el envio fallo, hay que soltarlo:
-                # si no, el reintento del proveedor se descartaria por duplicado y el cliente
+                # si no, un reintento del proveedor se descartaria por duplicado y el cliente
                 # se quedaria sin respuesta para siempre.
                 logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
                 await liberar_evento(evento_id)
@@ -642,7 +648,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Error procesando el mensaje de {msg.telefono}: {e}")
             await liberar_evento(evento_id)
-            try:
-                await proveedor.enviar_mensaje(msg.telefono, obtener_mensaje_error(), msg.contexto)
-            except Exception:  # noqa: BLE001
+            # Un solo intento: es un aviso de cortesia. Si el canal esta caido, insistir
+            # 13 segundos con un mensaje que ya no le sirve a nadie no tiene sentido.
+            if not await enviar(proveedor, msg.telefono, obtener_mensaje_error(), msg.contexto, intentos=1):
                 logger.error("Tampoco se pudo avisarle al cliente del error")
